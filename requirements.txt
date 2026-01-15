@@ -1,0 +1,5 @@
+textual>=0.40.0
+httpx>=0.25.0
+pytest>=7.0.0
+black>=23.0.0
+flake8>=6.0.0
