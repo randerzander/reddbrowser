@@ -13,13 +13,13 @@ def validate_application():
         print("✓ API module imported successfully")
         
         # Test importing the main application
-        from reddit_browser.main import RedditBrowserApp, PostCard, main
+        from reddit_browser.app import RedditBrowserApp, PostCard, main
         print("✓ Main application module imported successfully")
-        
+
         # Test that we can instantiate the app
         app = RedditBrowserApp("LocalLlama")
         print("✓ Application instance created successfully")
-        
+
         # Test that we can access the key methods
         assert hasattr(app, 'compose')
         assert hasattr(app, 'on_mount')
