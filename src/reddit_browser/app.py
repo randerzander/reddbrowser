@@ -105,6 +105,7 @@ class CommentScreen(ModalScreen):
         self.permalink = post_data["data"]["permalink"]
         self.selftext = html.unescape(post_data["data"].get("selftext", ""))
         self.label = Label("")
+        self.caption_label = Label("")  # For VLM captions
         self.all_comments = []  # Store all comments
         self.expanded_comments = set()  # Track expanded comments
         self.comments_per_page = 20  # Increased to show more comments
@@ -114,11 +115,27 @@ class CommentScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         """Create child widgets for the screen."""
         yield Header()
-        yield VerticalScroll(self.label)
+        yield Horizontal(
+            VerticalScroll(self.label, id="comments_column"),
+            VerticalScroll(Label("", id="caption_content"), id="captions_column"),
+            id="main_container"
+        )
         yield Footer()
 
     def on_mount(self) -> None:
-        """Load the post and comments when mounted."""
+        """Set up styles and load content after mounting."""
+        # Style the main container to divide space evenly
+        self.query_one("#main_container", Horizontal).styles.height = "1fr"
+
+        # Style the columns to have equal width
+        comments_col = self.query_one("#comments_column", VerticalScroll)
+        captions_col = self.query_one("#captions_column", VerticalScroll)
+        comments_col.styles.width = "1fr"
+        captions_col.styles.width = "1fr"
+        comments_col.styles.border = ("solid", "blue")
+        captions_col.styles.border = ("solid", "green")
+
+        # Load the post and comments
         self.call_later(self.load_comments)
 
     async def load_comments(self):
@@ -144,13 +161,36 @@ class CommentScreen(ModalScreen):
                 # Initially expand all comments by adding all comment IDs with replies to expanded_comments
                 self.expand_all_comments()
 
+                # Check if this is an image post and prepare caption area
+                if self.is_image_post(self.url):
+                    # Initialize caption area with loading message
+                    caption_content = "[yellow]Generating image caption...[/yellow]"
+                    self.caption_label.update(caption_content)
+
+                    # Update the caption column in the DOM
+                    caption_scroll = self.query_one("#caption_content", Label)
+                    caption_scroll.update(caption_content)
+
+                    # Check if OpenAI is available to generate the caption
+                    if OPENAI_AVAILABLE:
+                        # Schedule the description generation to happen after the content is displayed
+                        self.call_later(self.start_image_description_generation)
+                    else:
+                        # Update caption area with error message if OpenAI is not available
+                        caption_content = "[red]OpenAI not available for caption generation[/red]"
+                        self.caption_label.update(caption_content)
+                        caption_scroll.update(caption_content)
+                else:
+                    # For non-image posts, show a placeholder in the caption area
+                    caption_content = "[blue]Not an image post - no caption needed[/blue]"
+                    self.caption_label.update(caption_content)
+
+                    # Update the caption column in the DOM
+                    caption_scroll = self.query_one("#caption_content", Label)
+                    caption_scroll.update(caption_content)
+
                 # Display the first page of comments
                 self.display_comments()
-
-                # Check if this is an image post and schedule description generation if OpenAI is available
-                if self.is_image_post(self.url) and OPENAI_AVAILABLE:
-                    # Schedule the description generation to happen after the content is displayed
-                    self.call_later(self.start_image_description_generation)
 
         except Exception as e:
             error_content = (
@@ -168,6 +208,14 @@ class CommentScreen(ModalScreen):
             error_content += "[yellow]Press ESC to return[/yellow]"
 
             self.label.update(error_content)
+
+            # Update caption panel with error or placeholder
+            caption_content = f"[red]Error loading caption: {str(e)}[/red]"
+            self.caption_label.update(caption_content)
+
+            # Update the caption column in the DOM
+            caption_scroll = self.query_one("#caption_content", Label)
+            caption_scroll.update(caption_content)
 
     def expand_all_comments(self):
         """Initially expand all comments that have replies."""
@@ -584,27 +632,23 @@ class CommentScreen(ModalScreen):
 
         return response.choices[0].message.content
 
-    def _update_label_with_description(self, description):
-        """Helper method to update the label with the image description."""
-        # Update the label to include the description right after the image information
-        current_content = self.label.renderable.plain if hasattr(self.label.renderable, 'plain') else str(self.label.renderable)
+    def _update_caption_column(self, description):
+        """Helper method to update the caption column with the image description."""
+        # Update the caption column with the description
+        caption_content = f"[green]{description}[/green]"
 
-        # Find the position to insert the description - after the image info but before comments
-        if "Press 'v' to open image in GUI viewer" in current_content:
-            # Insert right after the image viewer instruction
-            insertion_point = current_content.find("Press 'v' to open image in GUI viewer") + len("Press 'v' to open image in GUI viewer")
-            updated_content = current_content[:insertion_point] + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]" + current_content[insertion_point:]
-        else:
-            # If not found, append at the end
-            updated_content = current_content + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]"
+        # Update both the internal caption_label and the DOM element
+        self.caption_label.update(caption_content)
+        caption_scroll = self.query_one("#caption_content", Label)
+        caption_scroll.update(caption_content)
 
-        return updated_content
+        return caption_content
 
-    def _schedule_ui_update(self, updated_content, success_msg="Image description added to post!"):
-        """Helper method to schedule UI updates on the main thread."""
+    def _schedule_caption_update(self, description, success_msg="Image caption generated!"):
+        """Helper method to schedule caption updates on the main thread."""
         # Use Textual's worker system to schedule updates on the main thread
         async def update_ui():
-            self.label.update(updated_content)
+            self._update_caption_column(description)
             self.notify(success_msg)
 
         # Schedule the update on the main thread
@@ -633,10 +677,8 @@ class CommentScreen(ModalScreen):
             if description is None:
                 return  # Error already notified
 
-            # Update the UI with the description
-            updated_content = self._update_label_with_description(description)
-            self._schedule_ui_update(updated_content)
-
+            # Update the caption column with the description
+            self._schedule_caption_update(description)
         except Exception as e:
             self._handle_image_description_error(e)
 
@@ -658,10 +700,8 @@ class CommentScreen(ModalScreen):
             if description is None:
                 return  # Error already notified
 
-            # Update the UI with the description
-            updated_content = self._update_label_with_description(description)
-            self._schedule_ui_update(updated_content)
-
+            # Update the caption column with the description
+            self._schedule_caption_update(description)
         except Exception as e:
             self._handle_image_description_error(e)
 
