@@ -585,102 +585,134 @@ class CommentScreen(ModalScreen):
         with ThreadPoolExecutor() as executor:
             await loop.run_in_executor(executor, self.generate_image_description_sync_from_path, image_path)
 
+    def _get_mime_type(self, source, is_file=True):
+        """Helper method to determine the MIME type based on file extension."""
+        import os
+        from urllib.parse import urlparse
+
+        if is_file:
+            file_ext = os.path.splitext(source)[1].lower()
+        else:
+            parsed_url = urlparse(source)
+            file_ext = os.path.splitext(parsed_url.path)[1].lower()
+
+        if file_ext in ['.png']:
+            return 'image/png'
+        elif file_ext in ['.gif']:
+            return 'image/gif'
+        else:
+            return 'image/jpeg'  # default
+
+    def _get_openai_client(self):
+        """Helper method to initialize and return the OpenAI client."""
+        import os
+
+        # Check if OpenAI is available before proceeding
+        if OpenAI is None:
+            self.notify("OpenAI library not available. Install with: pip install openai", severity="error")
+            return None
+
+        # Get the API key from environment variable
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            self.notify("OPENROUTER_API_KEY not set in environment", severity="error")
+            return None
+
+        # Initialize the OpenAI client with OpenRouter
+        return OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1"
+        )
+
+    def _generate_image_description(self, image_data, mime_type):
+        """Helper method to generate image description using OpenAI."""
+        client = self._get_openai_client()
+        if not client:
+            return None
+
+        # Call the model to generate a description
+        response = client.chat.completions.create(
+            model="qwen/qwen-2.5-vl-7b-instruct:free",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image in detail. Provide a comprehensive description of what you see in the image."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{image_data}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=500
+        )
+
+        return response.choices[0].message.content
+
+    def _update_label_with_description(self, description):
+        """Helper method to update the label with the image description."""
+        # Update the label to include the description right after the image information
+        current_content = self.label.renderable.plain if hasattr(self.label.renderable, 'plain') else str(self.label.renderable)
+
+        # Find the position to insert the description - after the image info but before comments
+        if "Press 'v' to open image in GUI viewer" in current_content:
+            # Insert right after the image viewer instruction
+            insertion_point = current_content.find("Press 'v' to open image in GUI viewer") + len("Press 'v' to open image in GUI viewer")
+            updated_content = current_content[:insertion_point] + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]" + current_content[insertion_point:]
+        else:
+            # If not found, append at the end
+            updated_content = current_content + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]"
+
+        return updated_content
+
+    def _schedule_ui_update(self, updated_content, success_msg="Image description added to post!"):
+        """Helper method to schedule UI updates on the main thread."""
+        # Use Textual's worker system to schedule updates on the main thread
+        async def update_ui():
+            self.label.update(updated_content)
+            self.notify(success_msg)
+
+        # Schedule the update on the main thread
+        self.call_later(update_ui)
+
+    def _handle_image_description_error(self, error):
+        """Helper method to handle image description errors."""
+        async def show_error():
+            self.notify(f"Error generating image description: {str(error)}", severity="error")
+
+        # Schedule the error notification on the main thread
+        self.call_later(show_error)
+
     def generate_image_description_sync_from_path(self, image_path):
         """Synchronous version of image description generation from a file path to run in a thread."""
         try:
             import os
             import base64
-            from urllib.parse import urlparse
-
-            # Check if OpenAI is available before proceeding
-            if OpenAI is None:
-                self.notify("OpenAI library not available. Install with: pip install openai", severity="error")
-                return
 
             # Read the image file and encode it to base64
             with open(image_path, "rb") as image_file:
                 image_data = base64.b64encode(image_file.read()).decode('utf-8')
 
-            # Get the API key from environment variable
-            api_key = os.getenv("OPENROUTER_API_KEY")
-            if not api_key:
-                self.notify("OPENROUTER_API_KEY not set in environment", severity="error")
-                return
-
             # Determine the image format based on file extension
-            file_ext = os.path.splitext(image_path)[1].lower()
-            if file_ext in ['.png']:
-                mime_type = 'image/png'
-            elif file_ext in ['.gif']:
-                mime_type = 'image/gif'
-            else:
-                mime_type = 'image/jpeg'  # default
+            mime_type = self._get_mime_type(image_path, is_file=True)
 
-            # Initialize the OpenAI client with OpenRouter
-            client = OpenAI(
-                api_key=api_key,
-                base_url="https://openrouter.ai/api/v1"
-            )
+            # Generate the description
+            description = self._generate_image_description(image_data, mime_type)
+            if description is None:
+                return  # Error already notified
 
-            # Call the model to generate a description
-            response = client.chat.completions.create(
-                model="qwen/qwen-2.5-vl-7b-instruct:free",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Describe this image in detail. Provide a comprehensive description of what you see in the image."
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime_type};base64,{image_data}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=500
-            )
-
-            # Get the description
-            description = response.choices[0].message.content
-
-            # Update the label to include the description right after the image information
-            current_content = self.label.renderable.plain if hasattr(self.label.renderable, 'plain') else str(self.label.renderable)
-
-            # Find the position to insert the description - after the image info but before comments
-            if "Press 'v' to open image in GUI viewer" in current_content:
-                # Insert right after the image viewer instruction
-                insertion_point = current_content.find("Press 'v' to open image in GUI viewer") + len("Press 'v' to open image in GUI viewer")
-                updated_content = current_content[:insertion_point] + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]" + current_content[insertion_point:]
-            else:
-                # If not found, append at the end
-                updated_content = current_content + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]"
-
-            # Schedule UI updates on the main thread using Textual's proper mechanism
-            from textual.worker import Worker, get_current_worker
-            import asyncio
-
-            # Use Textual's worker system to schedule updates on the main thread
-            async def update_ui():
-                self.label.update(updated_content)
-                self.notify("Image description added to post!")
-
-            # Schedule the update on the main thread
-            self.call_later(update_ui)
+            # Update the UI with the description
+            updated_content = self._update_label_with_description(description)
+            self._schedule_ui_update(updated_content)
 
         except Exception as e:
-            from textual.worker import Worker, get_current_worker
-            import asyncio
-
-            async def show_error():
-                self.notify(f"Error generating image description: {str(e)}", severity="error")
-
-            # Schedule the error notification on the main thread
-            self.call_later(show_error)
+            self._handle_image_description_error(e)
 
     def generate_image_description_sync(self):
         """Synchronous version of image description generation to run in a thread."""
@@ -688,12 +720,6 @@ class CommentScreen(ModalScreen):
             import os
             import base64
             import requests
-            from urllib.parse import urlparse
-
-            # Check if OpenAI is available before proceeding
-            if OpenAI is None:
-                self.notify("OpenAI library not available. Install with: pip install openai", severity="error")
-                return
 
             # Download the image from the post URL
             response = requests.get(self.url, headers={"User-Agent": "RedditBrowser/0.1.0"})
@@ -702,87 +728,20 @@ class CommentScreen(ModalScreen):
             # Encode the image to base64
             image_data = base64.b64encode(response.content).decode('utf-8')
 
-            # Get the API key from environment variable
-            api_key = os.getenv("OPENROUTER_API_KEY")
-            if not api_key:
-                self.notify("OPENROUTER_API_KEY not set in environment", severity="error")
-                return
-
             # Determine the image format based on URL
-            parsed_url = urlparse(self.url)
-            file_ext = os.path.splitext(parsed_url.path)[1].lower()
-            if file_ext in ['.png']:
-                mime_type = 'image/png'
-            elif file_ext in ['.gif']:
-                mime_type = 'image/gif'
-            else:
-                mime_type = 'image/jpeg'  # default
+            mime_type = self._get_mime_type(self.url, is_file=False)
 
-            # Initialize the OpenAI client with OpenRouter
-            client = OpenAI(
-                api_key=api_key,
-                base_url="https://openrouter.ai/api/v1"
-            )
+            # Generate the description
+            description = self._generate_image_description(image_data, mime_type)
+            if description is None:
+                return  # Error already notified
 
-            # Call the model to generate a description
-            response = client.chat.completions.create(
-                model="qwen/qwen-2.5-vl-7b-instruct:free",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Describe this image in detail. Provide a comprehensive description of what you see in the image."
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime_type};base64,{image_data}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=500
-            )
-
-            # Get the description
-            description = response.choices[0].message.content
-
-            # Update the label to include the description right after the image information
-            current_content = self.label.renderable.plain if hasattr(self.label.renderable, 'plain') else str(self.label.renderable)
-
-            # Find the position to insert the description - after the image info but before comments
-            if "Press 'v' to open image in GUI viewer" in current_content:
-                # Insert right after the image viewer instruction
-                insertion_point = current_content.find("Press 'v' to open image in GUI viewer") + len("Press 'v' to open image in GUI viewer")
-                updated_content = current_content[:insertion_point] + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]" + current_content[insertion_point:]
-            else:
-                # If not found, append at the end
-                updated_content = current_content + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]"
-
-            # Schedule UI updates on the main thread using Textual's proper mechanism
-            from textual.worker import Worker, get_current_worker
-            import asyncio
-
-            # Use Textual's worker system to schedule updates on the main thread
-            async def update_ui():
-                self.label.update(updated_content)
-                self.notify("Image description added to post!")
-
-            # Schedule the update on the main thread
-            self.call_later(update_ui)
+            # Update the UI with the description
+            updated_content = self._update_label_with_description(description)
+            self._schedule_ui_update(updated_content)
 
         except Exception as e:
-            from textual.worker import Worker, get_current_worker
-            import asyncio
-
-            async def show_error():
-                self.notify(f"Error generating image description: {str(e)}", severity="error")
-
-            # Schedule the error notification on the main thread
-            self.call_later(show_error)
+            self._handle_image_description_error(e)
 
     async def generate_image_description_for_post(self):
         """Generate a description of the image using OpenRouter API for the current post."""
