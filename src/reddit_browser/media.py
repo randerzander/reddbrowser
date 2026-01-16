@@ -114,10 +114,10 @@ async def generate_image_description(url: str = None, image_path: str = None) ->
             elif '.gif' in url.lower(): mime_type = 'image/gif'
 
         client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        
+
         # Use the same model as before
         model = os.getenv("VLM_MODEL", "qwen/qwen-2.5-vl-7b-instruct:free")
-        
+
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -134,3 +134,37 @@ async def generate_image_description(url: str = None, image_path: str = None) ->
         return response.choices[0].message.content
     except Exception as e:
         return f"Error generating description: {str(e)}"
+
+
+async def generate_text_summary(text: str) -> str:
+    """Generate a summary of the provided text using the Nvidia Nemotron model via OpenRouter API."""
+    if not OPENAI_AVAILABLE:
+        return "Error: OpenAI library not installed."
+
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return "Error: OPENROUTER_API_KEY not set."
+
+    try:
+        # Limit text length to avoid token limits
+        if len(text) > 2000:  # Rough character limit
+            text = text[:2000] + "... (truncated)"
+
+        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+
+        # Use the Nvidia Nemotron model
+        model = os.getenv("TEXT_SUMMARY_MODEL", "nvidia/nemotron-3-nano-30b-a3b:free")
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Please provide a concise summary of the following text:\n\n{text}\n\nSummary:"
+                }
+            ],
+            max_tokens=300
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error generating summary: {str(e)}"

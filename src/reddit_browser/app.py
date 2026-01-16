@@ -10,7 +10,7 @@ from textual.screen import ModalScreen
 import sys
 import os
 from .api import RedditAPI, get_first_two_pages, get_comments_tree
-from .media import is_image_url, open_image_in_viewer, generate_image_description, download_image, OPENAI_AVAILABLE
+from .media import is_image_url, open_image_in_viewer, generate_image_description, download_image, OPENAI_AVAILABLE, generate_text_summary
 from typing import List, Dict, Set
 import html
 import asyncio
@@ -161,8 +161,12 @@ class CommentScreen(ModalScreen):
                 # Initially expand all comments by adding all comment IDs with replies to expanded_comments
                 self.expand_all_comments()
 
-                # Check if this is an image post and prepare caption area
-                if self.is_image_post(self.url):
+                # Determine what to show in the right column based on post content
+                has_selftext = bool(self.selftext.strip())
+                is_image = self.is_image_post(self.url)
+
+                if is_image and has_selftext:
+                    # Both image and text - prioritize image captioning
                     # Initialize caption area with loading message
                     caption_content = "[yellow]Generating image caption...[/yellow]"
                     self.caption_label.update(caption_content)
@@ -180,12 +184,40 @@ class CommentScreen(ModalScreen):
                         caption_content = "[red]OpenAI not available for caption generation[/red]"
                         self.caption_label.update(caption_content)
                         caption_scroll.update(caption_content)
-                else:
-                    # For non-image posts, show a placeholder in the caption area
-                    caption_content = "[blue]Not an image post - no caption needed[/blue]"
+                elif is_image:
+                    # Image post only - generate image caption
+                    caption_content = "[yellow]Generating image caption...[/yellow]"
                     self.caption_label.update(caption_content)
 
-                    # Update the caption column in the DOM
+                    caption_scroll = self.query_one("#caption_content", Label)
+                    caption_scroll.update(caption_content)
+
+                    if OPENAI_AVAILABLE:
+                        self.call_later(self.start_image_description_generation)
+                    else:
+                        caption_content = "[red]OpenAI not available for caption generation[/red]"
+                        self.caption_label.update(caption_content)
+                        caption_scroll.update(caption_content)
+                elif has_selftext:
+                    # Text post only - generate text summary
+                    caption_content = "[yellow]Generating text summary...[/yellow]"
+                    self.caption_label.update(caption_content)
+
+                    caption_scroll = self.query_one("#caption_content", Label)
+                    caption_scroll.update(caption_content)
+
+                    if OPENAI_AVAILABLE:
+                        # Schedule text summary generation
+                        self.call_later(self.start_text_summarization)
+                    else:
+                        caption_content = "[red]OpenAI not available for text summarization[/red]"
+                        self.caption_label.update(caption_content)
+                        caption_scroll.update(caption_content)
+                else:
+                    # Neither image nor text - show placeholder
+                    caption_content = "[blue]No content to summarize[/blue]"
+                    self.caption_label.update(caption_content)
+
                     caption_scroll = self.query_one("#caption_content", Label)
                     caption_scroll.update(caption_content)
 
@@ -210,7 +242,7 @@ class CommentScreen(ModalScreen):
             self.label.update(error_content)
 
             # Update caption panel with error or placeholder
-            caption_content = f"[red]Error loading caption: {str(e)}[/red]"
+            caption_content = f"[red]Error loading AI content: {str(e)}[/red]"
             self.caption_label.update(caption_content)
 
             # Update the caption column in the DOM
@@ -552,6 +584,34 @@ class CommentScreen(ModalScreen):
             self.notify("Generating image description...")
             # Run the description generation in a separate thread to prevent blocking
             asyncio.create_task(self.run_vlm_in_thread())
+
+    def start_text_summarization(self):
+        """Start the text summarization after UI is displayed."""
+        if OPENAI_AVAILABLE:
+            # Show notification that summarization is starting
+            self.notify("Generating text summary...")
+            # Run the summarization asynchronously
+            asyncio.create_task(self.run_text_summarization_async())
+
+    async def run_text_summarization_async(self):
+        """Run the text summarization asynchronously."""
+        try:
+            # Generate summary using the media module function
+            summary = await generate_text_summary(self.selftext)
+            if summary and not summary.startswith("Error"):
+                # Update the caption column with the summary
+                self._schedule_caption_update(summary, "Text summary generated!")
+            else:
+                # Update with error message
+                error_content = f"[red]{summary}[/red]"
+                self.caption_label.update(error_content)
+                caption_scroll = self.query_one("#caption_content", Label)
+                caption_scroll.update(error_content)
+        except Exception as e:
+            error_content = f"[red]Error in text summarization: {str(e)}[/red]"
+            self.caption_label.update(error_content)
+            caption_scroll = self.query_one("#caption_content", Label)
+            caption_scroll.update(error_content)
 
     async def run_vlm_in_thread(self):
         """Run the VLM call in a separate thread."""
