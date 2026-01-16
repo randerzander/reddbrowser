@@ -13,6 +13,16 @@ from .api import get_first_two_pages
 from typing import List, Dict
 import html
 import asyncio
+import tempfile
+import os
+from pathlib import Path
+import subprocess
+import sys
+try:
+    from term_image.image import from_url, from_file
+    TERM_IMAGE_AVAILABLE = True
+except ImportError:
+    TERM_IMAGE_AVAILABLE = False
 
 
 class PostCard(Static, can_focus=True):
@@ -261,6 +271,10 @@ class CommentScreen(ModalScreen):
             self.select_next_comment()
         elif event.key == "up":
             self.select_previous_comment()
+        elif event.key == "v":
+            # View image if this is an image post
+            if self.is_image_post(self.url) and TERM_IMAGE_AVAILABLE:
+                self.view_image()
 
     def select_next_comment(self):
         """Select the next comment."""
@@ -346,6 +360,9 @@ class CommentScreen(ModalScreen):
         start_idx = self.current_comment_page * self.comments_per_page
         end_idx = min(start_idx + self.comments_per_page, len(flattened_comments))
 
+        # Check if this is an image post
+        is_image_post = self.is_image_post(self.url)
+
         # Format the content
         content = (
             f"[bold][green]{self.title}[/green][/bold]\n\n"
@@ -355,8 +372,18 @@ class CommentScreen(ModalScreen):
             f"URL: [green]{self.url}[/green]\n\n"
         )
 
-        if self.selftext.strip():
-            content += f"Content:\n[green]{self.selftext}[/green]\n\n"
+        # If it's an image post and term-image is available, show a message about image display
+        if is_image_post and TERM_IMAGE_AVAILABLE:
+            content += f"[bold]IMAGE POST:[/bold]\n"
+            content += f"[green]This is an image post: {self.url}[/green]\n"
+            content += f"[yellow]Press 'v' to open image in GUI viewer (feh, eog, etc.)[/yellow]\n\n"
+        elif is_image_post and not TERM_IMAGE_AVAILABLE:
+            content += f"[green]This is an image post: {self.url}[/green]\n"
+            content += "[yellow]Install term-image to view images in terminal[/yellow]\n\n"
+        else:
+            # Regular post content
+            if self.selftext.strip():
+                content += f"Content:\n[green]{self.selftext}[/green]\n\n"
 
         content += "[bold]COMMENTS:[/bold]\n\n"
 
@@ -391,9 +418,103 @@ class CommentScreen(ModalScreen):
         # Add pagination info
         total_pages = (len(flattened_comments) + self.comments_per_page - 1) // self.comments_per_page
         content += f"[yellow]Page {self.current_comment_page + 1} of {total_pages}[/yellow] | "
-        content += f"[yellow]j/k: page up/down, ↑/↓: select comment, +/-: expand/collapse, ESC: return[/yellow]"
+        content += f"[yellow]j/k: page up/down, ↑/↓: select comment, +/-: expand/collapse, v: view image in GUI, ESC: return[/yellow]"
 
         self.label.update(content)
+
+    def is_image_post(self, url: str) -> bool:
+        """Check if the post URL points to an image."""
+        if not url:
+            return False
+
+        # Common image extensions
+        image_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']
+
+        # Check if URL ends with an image extension or comes from image hosting services
+        url_lower = url.lower()
+
+        # Check for common image hosting domains
+        image_domains = [
+            'i.redd.it', 'i.imgur.com', 'imgur.com', 'flickr.com',
+            'instagram.com', 'twitter.com', 'facebook.com',
+            'cdn.discordapp.com', 'media.discordapp.net'
+        ]
+
+        # Check if it's from a known image domain
+        for domain in image_domains:
+            if domain in url_lower:
+                # Special handling for imgur - check if it's not an album/gallery
+                if 'imgur.com' in domain and any(x in url_lower for x in ['/a/', '/gallery/', 'album']):
+                    return False  # Imgur albums/galleries are not single images
+                return True
+
+        # Check if URL ends with an image extension
+        for ext in image_extensions:
+            if url_lower.endswith(ext):
+                return True
+
+        return False
+
+    def view_image(self):
+        """Display the image using feh (GUI image viewer)."""
+        try:
+            import requests
+            from urllib.parse import urlparse
+
+            # Download the image to a temporary file
+            response = requests.get(self.url, headers={"User-Agent": "RedditBrowser/0.1.0"})
+            response.raise_for_status()
+
+            # Get file extension from URL
+            parsed_url = urlparse(self.url)
+            file_ext = os.path.splitext(parsed_url.path)[1]
+            if not file_ext:
+                # Guess from content type if not in URL
+                content_type = response.headers.get('content-type', '')
+                if 'jpeg' in content_type or 'jpg' in content_type:
+                    file_ext = '.jpg'
+                elif 'png' in content_type:
+                    file_ext = '.png'
+                elif 'gif' in content_type:
+                    file_ext = '.gif'
+                else:
+                    file_ext = '.png'  # Default
+
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+                tmp_file.write(response.content)
+                temp_path = tmp_file.name
+
+            # Try to open with feh or other image viewers
+            viewers = [
+                ['feh', temp_path],           # Lightweight image viewer
+                ['xdg-open', temp_path],      # Generic opener
+                ['eog', temp_path],           # Eye of GNOME
+                ['gpicview', temp_path],      # Lightweight GTK viewer
+                ['gthumb', temp_path],        # GNOME image viewer
+                ['ristretto', temp_path],     # XFCE image viewer
+                ['shotwell', temp_path],      # Photo manager
+            ]
+
+            viewer_used = None
+            for viewer_cmd in viewers:
+                try:
+                    # Run the image viewer in the background so the app continues
+                    subprocess.Popen(viewer_cmd)
+                    viewer_used = viewer_cmd[0]
+                    self.notify(f"Opened image with {viewer_used}")
+                    break
+                except FileNotFoundError:
+                    continue  # Viewer not installed, try next one
+
+            if not viewer_used:
+                self.notify("No image viewer found. Install 'feh' or 'eog'", severity="error")
+                # Clean up the temporary file if no viewer is found
+                os.unlink(temp_path)
+                return
+
+        except Exception as e:
+            self.notify(f"Error preparing image for viewer: {str(e)}", severity="error")
 
     def flatten_comments(self, comments, level=0):
         """Flatten the comment tree for display."""
