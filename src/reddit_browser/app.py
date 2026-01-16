@@ -9,18 +9,17 @@ from textual.message import Message
 from textual.screen import ModalScreen
 import sys
 import os
-from .api import get_first_two_pages
-from typing import List, Dict
+from .api import RedditAPI, get_first_two_pages, get_comments_tree
+from .media import is_image_url, open_image_in_viewer, generate_image_description, download_image, OPENAI_AVAILABLE
+from typing import List, Dict, Set
 import html
 import asyncio
-import tempfile
 import os
 from pathlib import Path
-import subprocess
-import sys
-import base64
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from textual import work
+from textual.worker import Worker, get_current_worker
+
 try:
     from term_image.image import from_url, from_file
     TERM_IMAGE_AVAILABLE = True
@@ -29,19 +28,19 @@ except ImportError:
 
 try:
     from openai import OpenAI
-    OPENAI_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
+    OpenAI = None  # Define as None if not available
 
 
 class PostCard(Static, can_focus=True):
     """Widget to display a single Reddit post that can be focused."""
 
-    def __init__(self, post_data: Dict, index: int):
+    def __init__(self, post_data: Dict, index: int, numbered_title: str = None):
         super().__init__()
         self.post_data = post_data
         self.index = index
         self.title = html.unescape(post_data["data"]["title"])
+        self.numbered_title = numbered_title or self.title
         self.author = post_data["data"]["author"]
         self.score = post_data["data"]["score"]
         self.num_comments = post_data["data"]["num_comments"]
@@ -54,47 +53,6 @@ class PostCard(Static, can_focus=True):
             self.selftext = self.selftext[:97] + "..."
 
         # Simple content display - just the title in green
-        content = f"[green]{self.title}[/green]"
-        self.update(content)
-
-    def on_click(self) -> None:
-        """Handle click event."""
-        self.focus()
-
-    def on_key(self, event: events.Key) -> None:
-        """Handle key press events."""
-        if event.key == "enter":
-            # Send message to parent to handle post selection
-            self.post_message(PostSelected(self.index))
-
-    def on_focus(self) -> None:
-        """Handle when the widget gets focus."""
-        self.styles.background = "darkgray"
-        self.styles.border = ("solid", "yellow")
-
-    def on_blur(self) -> None:
-        """Handle when the widget loses focus."""
-        self.styles.background = "black"
-        self.styles.border = ("solid", "white")
-
-
-class PostCardWithNumber(Static, can_focus=True):
-    """Widget to display a single Reddit post with a number prefix that can be focused."""
-
-    def __init__(self, numbered_title: str, post_data: Dict, index: int):
-        super().__init__()
-        self.numbered_title = numbered_title
-        self.post_data = post_data
-        self.index = index
-        self.title = html.unescape(post_data["data"]["title"])
-        self.author = post_data["data"]["author"]
-        self.score = post_data["data"]["score"]
-        self.num_comments = post_data["data"]["num_comments"]
-        self.url = post_data["data"]["url"]
-        self.permalink = post_data["data"]["permalink"]
-        self.selftext = html.unescape(post_data["data"].get("selftext", ""))
-
-        # Simple content display - just the numbered title in green
         content = f"[green]{self.numbered_title}[/green]"
         self.update(content)
 
@@ -111,8 +69,7 @@ class PostCardWithNumber(Static, can_focus=True):
     def on_focus(self) -> None:
         """Handle when the widget gets focus."""
         self.styles.background = "darkgray"
-        # No border for cleaner look
-        self.styles.underline = True  # Underline instead of border for focus
+        self.styles.underline = True
 
     def on_blur(self) -> None:
         """Handle when the widget loses focus."""
@@ -474,6 +431,8 @@ class CommentScreen(ModalScreen):
         try:
             import requests
             from urllib.parse import urlparse
+            import tempfile
+            import subprocess
 
             # Download the image to a temporary file
             response = requests.get(self.url, headers={"User-Agent": "RedditBrowser/0.1.0"})
@@ -529,7 +488,7 @@ class CommentScreen(ModalScreen):
                 self.notify(f"Opened image with {viewer_used}")
 
             # Generate description if OpenAI is available
-            if OPENAI_AVAILABLE:
+            if OPENAI_AVAILABLE and OpenAI is not None:
                 # Run the description generation in the background using the threaded approach
                 asyncio.create_task(self.run_vlm_for_file_in_thread(temp_path))
             else:
@@ -626,6 +585,103 @@ class CommentScreen(ModalScreen):
         with ThreadPoolExecutor() as executor:
             await loop.run_in_executor(executor, self.generate_image_description_sync_from_path, image_path)
 
+    def generate_image_description_sync_from_path(self, image_path):
+        """Synchronous version of image description generation from a file path to run in a thread."""
+        try:
+            import os
+            import base64
+            from urllib.parse import urlparse
+
+            # Check if OpenAI is available before proceeding
+            if OpenAI is None:
+                self.notify("OpenAI library not available. Install with: pip install openai", severity="error")
+                return
+
+            # Read the image file and encode it to base64
+            with open(image_path, "rb") as image_file:
+                image_data = base64.b64encode(image_file.read()).decode('utf-8')
+
+            # Get the API key from environment variable
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            if not api_key:
+                self.notify("OPENROUTER_API_KEY not set in environment", severity="error")
+                return
+
+            # Determine the image format based on file extension
+            file_ext = os.path.splitext(image_path)[1].lower()
+            if file_ext in ['.png']:
+                mime_type = 'image/png'
+            elif file_ext in ['.gif']:
+                mime_type = 'image/gif'
+            else:
+                mime_type = 'image/jpeg'  # default
+
+            # Initialize the OpenAI client with OpenRouter
+            client = OpenAI(
+                api_key=api_key,
+                base_url="https://openrouter.ai/api/v1"
+            )
+
+            # Call the model to generate a description
+            response = client.chat.completions.create(
+                model="qwen/qwen-2.5-vl-7b-instruct:free",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Describe this image in detail. Provide a comprehensive description of what you see in the image."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_data}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=500
+            )
+
+            # Get the description
+            description = response.choices[0].message.content
+
+            # Update the label to include the description right after the image information
+            current_content = self.label.renderable.plain if hasattr(self.label.renderable, 'plain') else str(self.label.renderable)
+
+            # Find the position to insert the description - after the image info but before comments
+            if "Press 'v' to open image in GUI viewer" in current_content:
+                # Insert right after the image viewer instruction
+                insertion_point = current_content.find("Press 'v' to open image in GUI viewer") + len("Press 'v' to open image in GUI viewer")
+                updated_content = current_content[:insertion_point] + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]" + current_content[insertion_point:]
+            else:
+                # If not found, append at the end
+                updated_content = current_content + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]"
+
+            # Schedule UI updates on the main thread using Textual's proper mechanism
+            from textual.worker import Worker, get_current_worker
+            import asyncio
+
+            # Use Textual's worker system to schedule updates on the main thread
+            async def update_ui():
+                self.label.update(updated_content)
+                self.notify("Image description added to post!")
+
+            # Schedule the update on the main thread
+            self.call_later(update_ui)
+
+        except Exception as e:
+            from textual.worker import Worker, get_current_worker
+            import asyncio
+
+            async def show_error():
+                self.notify(f"Error generating image description: {str(e)}", severity="error")
+
+            # Schedule the error notification on the main thread
+            self.call_later(show_error)
+
     def generate_image_description_sync(self):
         """Synchronous version of image description generation to run in a thread."""
         try:
@@ -633,6 +689,11 @@ class CommentScreen(ModalScreen):
             import base64
             import requests
             from urllib.parse import urlparse
+
+            # Check if OpenAI is available before proceeding
+            if OpenAI is None:
+                self.notify("OpenAI library not available. Install with: pip install openai", severity="error")
+                return
 
             # Download the image from the post URL
             response = requests.get(self.url, headers={"User-Agent": "RedditBrowser/0.1.0"})
@@ -811,7 +872,7 @@ class RedditBrowserApp(App):
             # Add numbering to the title (relative to current page, not global)
             page_number = i - start_idx + 1
             numbered_title = f"{page_number}. {html.unescape(self.posts[i]['data']['title'])}"
-            post_card = PostCardWithNumber(numbered_title, self.posts[i], i)
+            post_card = PostCard(self.posts[i], i, numbered_title=numbered_title)
             post_card.styles.height = "1"  # Single line per post
             post_card.styles.background = "black"
             post_card.styles.color = "white"
@@ -902,7 +963,7 @@ class RedditBrowserApp(App):
         # Get the grid containing the posts
         grid = self.query_one("#posts_grid", Grid)
 
-        # Get all the PostCardWithNumber widgets
+        # Get all the PostCard widgets
         post_cards = grid.children
 
         # Make sure we have a valid index

@@ -1,31 +1,27 @@
 """Reddit Browser - A textual TUI for browsing Reddit"""
 
 import httpx
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
+import html
 
 
 class RedditAPI:
     """A simple client for interacting with the Reddit API."""
     
-    def __init__(self):
+    def __init__(self, user_agent: str = "RedditBrowser/0.1.0"):
         self.base_url = "https://www.reddit.com"
+        self.headers = {"User-Agent": user_agent}
         self.client = httpx.Client(
-            headers={"User-Agent": "RedditBrowser/0.1.0"},
+            headers=self.headers,
+            timeout=10.0
+        )
+        self.async_client = httpx.AsyncClient(
+            headers=self.headers,
             timeout=10.0
         )
     
     def get_subreddit_posts(self, subreddit: str, limit: int = 25, after: Optional[str] = None) -> Dict:
-        """
-        Fetch posts from a subreddit.
-        
-        Args:
-            subreddit: The name of the subreddit (without r/)
-            limit: Number of posts to fetch (max 100)
-            after: Pagination token for next page
-        
-        Returns:
-            Dictionary containing the API response
-        """
+        """Fetch posts from a subreddit (sync)."""
         url = f"{self.base_url}/r/{subreddit}/.json"
         params = {"limit": limit}
         if after:
@@ -34,29 +30,104 @@ class RedditAPI:
         response = self.client.get(url, params=params)
         response.raise_for_status()
         return response.json()
-    
+
+    async def get_subreddit_posts_async(self, subreddit: str, limit: int = 25, after: Optional[str] = None) -> Dict:
+        """Fetch posts from a subreddit (async)."""
+        url = f"{self.base_url}/r/{subreddit}/.json"
+        params = {"limit": limit}
+        if after:
+            params["after"] = after
+            
+        response = await self.async_client.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
+
+    async def get_comments_async(self, permalink: str) -> List[Dict]:
+        """Fetch comments for a post (async)."""
+        url = f"{self.base_url}{permalink}.json"
+        response = await self.async_client.get(url)
+        response.raise_for_status()
+        return response.json()
+
+    def build_comment_tree(self, comments_data: List[Dict]) -> List[Dict]:
+        """Build a tree structure from flat comments data."""
+        def process_replies(replies_list):
+            """Recursively process replies to build the tree."""
+            result = []
+            if not replies_list or replies_list == []:
+                return result
+
+            for item in replies_list:
+                if item["kind"] == "t1":  # It's a comment
+                    comment_data = item["data"]
+                    comment_obj = {
+                        "data": comment_data,
+                        "replies": [],
+                        "level": 0
+                    }
+
+                    if "replies" in comment_data and comment_data["replies"]:
+                        if isinstance(comment_data["replies"], dict) and "data" in comment_data["replies"]:
+                            nested_replies = comment_data["replies"]["data"].get("children", [])
+                            comment_obj["replies"] = process_replies(nested_replies)
+
+                    result.append(comment_obj)
+
+            result.sort(key=lambda x: x["data"].get("score", 0), reverse=True)
+            return result
+
+        root_comments = []
+        for item in comments_data:
+            if item["kind"] == "t1":
+                comment_data = item["data"]
+                comment_obj = {
+                    "data": comment_data,
+                    "replies": [],
+                    "level": 0
+                }
+
+                if "replies" in comment_data and comment_data["replies"]:
+                    if isinstance(comment_data["replies"], dict) and "data" in comment_data["replies"]:
+                        nested_replies = comment_data["replies"]["data"].get("children", [])
+                        comment_obj["replies"] = process_replies(nested_replies)
+
+                root_comments.append(comment_obj)
+
+        root_comments.sort(key=lambda x: x["data"].get("score", 0), reverse=True)
+        return root_comments
+
+    def flatten_comments(self, comments: List[Dict], expanded_ids: set, level: int = 0) -> List[Dict]:
+        """Flatten the comment tree for display, respecting expanded state."""
+        result = []
+        for comment in comments:
+            comment_copy = dict(comment)
+            comment_copy["level"] = level
+            result.append(comment_copy)
+
+            comment_id = comment["data"]["id"]
+            if comment_id in expanded_ids:
+                result.extend(self.flatten_comments(comment["replies"], expanded_ids, level + 1))
+
+        return result
+
     def close(self):
-        """Close the HTTP client."""
+        """Close the HTTP clients."""
         self.client.close()
+        # Note: async_client.aclose() should be awaited, but we can't easily do it here
+        # In a real app, we'd use a context manager or proper lifecycle management
+
+    async def aclose(self):
+        """Close the async HTTP client."""
+        await self.async_client.aclose()
 
 
 def get_first_two_pages(subreddit: str) -> List[Dict]:
-    """
-    Get the first two pages of posts from a subreddit.
-    
-    Args:
-        subreddit: The name of the subreddit (without r/)
-    
-    Returns:
-        List of post dictionaries from both pages
-    """
+    """Get the first two pages of posts from a subreddit (sync)."""
     reddit = RedditAPI()
     try:
-        # Get first page
         first_page = reddit.get_subreddit_posts(subreddit, limit=25)
         posts = first_page["data"]["children"]
         
-        # Get second page if available
         after_token = first_page["data"].get("after")
         if after_token:
             second_page = reddit.get_subreddit_posts(subreddit, limit=25, after=after_token)
@@ -65,3 +136,14 @@ def get_first_two_pages(subreddit: str) -> List[Dict]:
         return posts
     finally:
         reddit.close()
+
+
+async def get_comments_tree(permalink: str) -> List[Dict]:
+    """Fetch and build comment tree (async)."""
+    reddit = RedditAPI()
+    try:
+        data = await reddit.get_comments_async(permalink)
+        comments_data = data[1]["data"]["children"] if len(data) > 1 else []
+        return reddit.build_comment_tree(comments_data)
+    finally:
+        await reddit.aclose()
