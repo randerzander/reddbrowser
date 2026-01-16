@@ -19,6 +19,12 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from textual import work
 from textual.worker import Worker, get_current_worker
+import base64
+import requests
+from urllib.parse import urlparse
+import tempfile
+import subprocess
+import httpx
 
 try:
     from term_image.image import from_url, from_file
@@ -118,7 +124,6 @@ class CommentScreen(ModalScreen):
     async def load_comments(self):
         """Load the post content and comments."""
         try:
-            import httpx
 
             # Fetch comments from Reddit API
             url = f"https://www.reddit.com{self.permalink}.json"
@@ -429,11 +434,6 @@ class CommentScreen(ModalScreen):
     def view_image(self):
         """Display the image using feh (GUI image viewer) and generate description."""
         try:
-            import requests
-            from urllib.parse import urlparse
-            import tempfile
-            import subprocess
-
             # Download the image to a temporary file
             response = requests.get(self.url, headers={"User-Agent": "RedditBrowser/0.1.0"})
             response.raise_for_status()
@@ -497,74 +497,6 @@ class CommentScreen(ModalScreen):
         except Exception as e:
             self.notify(f"Error preparing image for viewer: {str(e)}", severity="error")
 
-    async def generate_image_description(self, image_path):
-        """Generate a description of the image using OpenRouter API."""
-        try:
-            import os
-            import base64
-
-            # Read the image file and encode it to base64
-            with open(image_path, "rb") as image_file:
-                image_data = base64.b64encode(image_file.read()).decode('utf-8')
-
-            # Get the API key from environment variable
-            api_key = os.getenv("OPENROUTER_API_KEY")
-            if not api_key:
-                self.notify("OPENROUTER_API_KEY not set in environment", severity="error")
-                return
-
-            # Initialize the OpenAI client with OpenRouter
-            client = OpenAI(
-                api_key=api_key,
-                base_url="https://openrouter.ai/api/v1"
-            )
-
-            # Call the model to generate a description
-            response = client.chat.completions.create(
-                model="qwen/qwen-2.5-vl-7b-instruct:free",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Describe this image in detail. Provide a comprehensive description of what you see in the image."
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime_type};base64,{image_data}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=500
-            )
-
-            # Get the description
-            description = response.choices[0].message.content
-
-            # Update the label to include the description right after the image information
-            current_content = self.label.renderable.plain if hasattr(self.label.renderable, 'plain') else str(self.label.renderable)
-
-            # Find the position to insert the description - after the image info but before comments
-            if "Press 'v' to open image in GUI viewer" in current_content:
-                # Insert right after the image viewer instruction
-                insertion_point = current_content.find("Press 'v' to open image in GUI viewer") + len("Press 'v' to open image in GUI viewer")
-                updated_content = current_content[:insertion_point] + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]" + current_content[insertion_point:]
-            else:
-                # If not found, append at the end
-                updated_content = current_content + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]"
-
-            # Update the label - this is already on the main thread since it's called from the UI context
-            self.label.update(updated_content)
-
-            self.notify("Image description generated and displayed")
-
-        except Exception as e:
-            self.notify(f"Error generating image description: {str(e)}", severity="error")
-
     def start_image_description_generation(self):
         """Start the image description generation after UI is displayed."""
         if OPENAI_AVAILABLE:
@@ -587,8 +519,6 @@ class CommentScreen(ModalScreen):
 
     def _get_mime_type(self, source, is_file=True):
         """Helper method to determine the MIME type based on file extension."""
-        import os
-        from urllib.parse import urlparse
 
         if is_file:
             file_ext = os.path.splitext(source)[1].lower()
@@ -605,7 +535,6 @@ class CommentScreen(ModalScreen):
 
     def _get_openai_client(self):
         """Helper method to initialize and return the OpenAI client."""
-        import os
 
         # Check if OpenAI is available before proceeding
         if OpenAI is None:
@@ -692,9 +621,6 @@ class CommentScreen(ModalScreen):
     def generate_image_description_sync_from_path(self, image_path):
         """Synchronous version of image description generation from a file path to run in a thread."""
         try:
-            import os
-            import base64
-
             # Read the image file and encode it to base64
             with open(image_path, "rb") as image_file:
                 image_data = base64.b64encode(image_file.read()).decode('utf-8')
@@ -717,10 +643,6 @@ class CommentScreen(ModalScreen):
     def generate_image_description_sync(self):
         """Synchronous version of image description generation to run in a thread."""
         try:
-            import os
-            import base64
-            import requests
-
             # Download the image from the post URL
             response = requests.get(self.url, headers={"User-Agent": "RedditBrowser/0.1.0"})
             response.raise_for_status()
