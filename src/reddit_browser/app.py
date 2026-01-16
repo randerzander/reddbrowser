@@ -2,7 +2,7 @@
 """Main application file for the Reddit Browser TUI."""
 
 from textual.app import App, ComposeResult
-from textual.containers import Grid, VerticalScroll, Horizontal, Center, Middle, ScrollableContainer
+from textual.containers import Grid, VerticalScroll, Horizontal, Center, Middle, ScrollableContainer, Vertical
 from textual.widgets import Static, Header, Footer, Button, Label, Input, DataTable
 from textual import events
 from textual.message import Message
@@ -117,7 +117,14 @@ class CommentScreen(ModalScreen):
         yield Header()
         yield Horizontal(
             VerticalScroll(self.label, id="comments_column"),
-            VerticalScroll(Label("", id="caption_content"), id="captions_column"),
+            VerticalScroll(
+                Vertical(
+                    Static("[bold]AI Generated[/bold]", id="ai_header"),
+                    Label("", id="caption_content"),
+                    id="ai_column_container"
+                ),
+                id="captions_column"
+            ),
             id="main_container"
         )
         yield Footer()
@@ -600,7 +607,7 @@ class CommentScreen(ModalScreen):
             summary = await generate_text_summary(self.selftext)
             if summary and not summary.startswith("Error"):
                 # Update the caption column with the summary
-                self._schedule_caption_update(summary, "Text summary generated!")
+                self._schedule_caption_update(summary, "text", "Text summary generated!")
             else:
                 # Update with error message
                 error_content = f"[red]{summary}[/red]"
@@ -692,10 +699,18 @@ class CommentScreen(ModalScreen):
 
         return response.choices[0].message.content
 
-    def _update_caption_column(self, description):
-        """Helper method to update the caption column with the image description."""
-        # Update the caption column with the description
-        caption_content = f"[green]{description}[/green]"
+    def _update_caption_column(self, content, content_type="image"):
+        """Helper method to update the caption column with the AI-generated content."""
+        # Determine the heading based on content type
+        if content_type == "image":
+            heading = "[bold blue]Image Caption:[/bold blue]\n"
+        elif content_type == "text":
+            heading = "[bold green]Text Summary:[/bold green]\n"
+        else:
+            heading = ""
+
+        # Update the caption column with the content and heading
+        caption_content = f"{heading}[green]{content}[/green]"
 
         # Update both the internal caption_label and the DOM element
         self.caption_label.update(caption_content)
@@ -704,11 +719,11 @@ class CommentScreen(ModalScreen):
 
         return caption_content
 
-    def _schedule_caption_update(self, description, success_msg="Image caption generated!"):
+    def _schedule_caption_update(self, description, content_type="image", success_msg="AI content generated!"):
         """Helper method to schedule caption updates on the main thread."""
         # Use Textual's worker system to schedule updates on the main thread
         async def update_ui():
-            self._update_caption_column(description)
+            self._update_caption_column(description, content_type)
             self.notify(success_msg)
 
         # Schedule the update on the main thread
@@ -738,7 +753,7 @@ class CommentScreen(ModalScreen):
                 return  # Error already notified
 
             # Update the caption column with the description
-            self._schedule_caption_update(description)
+            self._schedule_caption_update(description, "image")
         except Exception as e:
             self._handle_image_description_error(e)
 
@@ -761,7 +776,7 @@ class CommentScreen(ModalScreen):
                 return  # Error already notified
 
             # Update the caption column with the description
-            self._schedule_caption_update(description)
+            self._schedule_caption_update(description, "image")
         except Exception as e:
             self._handle_image_description_error(e)
 
