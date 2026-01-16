@@ -18,11 +18,20 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import base64
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 try:
     from term_image.image import from_url, from_file
     TERM_IMAGE_AVAILABLE = True
 except ImportError:
     TERM_IMAGE_AVAILABLE = False
+
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 
 class PostCard(Static, can_focus=True):
@@ -175,6 +184,11 @@ class CommentScreen(ModalScreen):
 
                 # Display the first page of comments
                 self.display_comments()
+
+                # Check if this is an image post and schedule description generation if OpenAI is available
+                if self.is_image_post(self.url) and OPENAI_AVAILABLE:
+                    # Schedule the description generation to happen after the content is displayed
+                    self.call_later(self.start_image_description_generation)
 
         except Exception as e:
             error_content = (
@@ -456,7 +470,7 @@ class CommentScreen(ModalScreen):
         return False
 
     def view_image(self):
-        """Display the image using feh (GUI image viewer)."""
+        """Display the image using feh (GUI image viewer) and generate description."""
         try:
             import requests
             from urllib.parse import urlparse
@@ -502,7 +516,6 @@ class CommentScreen(ModalScreen):
                     # Run the image viewer in the background so the app continues
                     subprocess.Popen(viewer_cmd)
                     viewer_used = viewer_cmd[0]
-                    self.notify(f"Opened image with {viewer_used}")
                     break
                 except FileNotFoundError:
                     continue  # Viewer not installed, try next one
@@ -512,9 +525,210 @@ class CommentScreen(ModalScreen):
                 # Clean up the temporary file if no viewer is found
                 os.unlink(temp_path)
                 return
+            else:
+                self.notify(f"Opened image with {viewer_used}")
+
+            # Generate description if OpenAI is available
+            if OPENAI_AVAILABLE:
+                # Run the description generation in the background using the threaded approach
+                asyncio.create_task(self.run_vlm_for_file_in_thread(temp_path))
+            else:
+                self.notify("OpenAI not available. Install with: pip install openai", severity="warning")
 
         except Exception as e:
             self.notify(f"Error preparing image for viewer: {str(e)}", severity="error")
+
+    async def generate_image_description(self, image_path):
+        """Generate a description of the image using OpenRouter API."""
+        try:
+            import os
+            import base64
+
+            # Read the image file and encode it to base64
+            with open(image_path, "rb") as image_file:
+                image_data = base64.b64encode(image_file.read()).decode('utf-8')
+
+            # Get the API key from environment variable
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            if not api_key:
+                self.notify("OPENROUTER_API_KEY not set in environment", severity="error")
+                return
+
+            # Initialize the OpenAI client with OpenRouter
+            client = OpenAI(
+                api_key=api_key,
+                base_url="https://openrouter.ai/api/v1"
+            )
+
+            # Call the model to generate a description
+            response = client.chat.completions.create(
+                model="qwen/qwen-2.5-vl-7b-instruct:free",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Describe this image in detail. Provide a comprehensive description of what you see in the image."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_data}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=500
+            )
+
+            # Get the description
+            description = response.choices[0].message.content
+
+            # Update the label to include the description right after the image information
+            current_content = self.label.renderable.plain if hasattr(self.label.renderable, 'plain') else str(self.label.renderable)
+
+            # Find the position to insert the description - after the image info but before comments
+            if "Press 'v' to open image in GUI viewer" in current_content:
+                # Insert right after the image viewer instruction
+                insertion_point = current_content.find("Press 'v' to open image in GUI viewer") + len("Press 'v' to open image in GUI viewer")
+                updated_content = current_content[:insertion_point] + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]" + current_content[insertion_point:]
+            else:
+                # If not found, append at the end
+                updated_content = current_content + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]"
+
+            # Update the label - this is already on the main thread since it's called from the UI context
+            self.label.update(updated_content)
+
+            self.notify("Image description generated and displayed")
+
+        except Exception as e:
+            self.notify(f"Error generating image description: {str(e)}", severity="error")
+
+    def start_image_description_generation(self):
+        """Start the image description generation after UI is displayed."""
+        if OPENAI_AVAILABLE:
+            # Show notification that captioning is starting
+            self.notify("Generating image description...")
+            # Run the description generation in a separate thread to prevent blocking
+            asyncio.create_task(self.run_vlm_in_thread())
+
+    async def run_vlm_in_thread(self):
+        """Run the VLM call in a separate thread."""
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            await loop.run_in_executor(executor, self.generate_image_description_sync)
+
+    async def run_vlm_for_file_in_thread(self, image_path):
+        """Run the VLM call for a file in a separate thread."""
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            await loop.run_in_executor(executor, self.generate_image_description_sync_from_path, image_path)
+
+    def generate_image_description_sync(self):
+        """Synchronous version of image description generation to run in a thread."""
+        try:
+            import os
+            import base64
+            import requests
+            from urllib.parse import urlparse
+
+            # Download the image from the post URL
+            response = requests.get(self.url, headers={"User-Agent": "RedditBrowser/0.1.0"})
+            response.raise_for_status()
+
+            # Encode the image to base64
+            image_data = base64.b64encode(response.content).decode('utf-8')
+
+            # Get the API key from environment variable
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            if not api_key:
+                self.notify("OPENROUTER_API_KEY not set in environment", severity="error")
+                return
+
+            # Determine the image format based on URL
+            parsed_url = urlparse(self.url)
+            file_ext = os.path.splitext(parsed_url.path)[1].lower()
+            if file_ext in ['.png']:
+                mime_type = 'image/png'
+            elif file_ext in ['.gif']:
+                mime_type = 'image/gif'
+            else:
+                mime_type = 'image/jpeg'  # default
+
+            # Initialize the OpenAI client with OpenRouter
+            client = OpenAI(
+                api_key=api_key,
+                base_url="https://openrouter.ai/api/v1"
+            )
+
+            # Call the model to generate a description
+            response = client.chat.completions.create(
+                model="qwen/qwen-2.5-vl-7b-instruct:free",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Describe this image in detail. Provide a comprehensive description of what you see in the image."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_data}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=500
+            )
+
+            # Get the description
+            description = response.choices[0].message.content
+
+            # Update the label to include the description right after the image information
+            current_content = self.label.renderable.plain if hasattr(self.label.renderable, 'plain') else str(self.label.renderable)
+
+            # Find the position to insert the description - after the image info but before comments
+            if "Press 'v' to open image in GUI viewer" in current_content:
+                # Insert right after the image viewer instruction
+                insertion_point = current_content.find("Press 'v' to open image in GUI viewer") + len("Press 'v' to open image in GUI viewer")
+                updated_content = current_content[:insertion_point] + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]" + current_content[insertion_point:]
+            else:
+                # If not found, append at the end
+                updated_content = current_content + f"\n\n[yellow]IMAGE DESCRIPTION:[/yellow]\n[green]{description}[/green]"
+
+            # Schedule UI updates on the main thread using Textual's proper mechanism
+            from textual.worker import Worker, get_current_worker
+            import asyncio
+
+            # Use Textual's worker system to schedule updates on the main thread
+            async def update_ui():
+                self.label.update(updated_content)
+                self.notify("Image description added to post!")
+
+            # Schedule the update on the main thread
+            self.call_later(update_ui)
+
+        except Exception as e:
+            from textual.worker import Worker, get_current_worker
+            import asyncio
+
+            async def show_error():
+                self.notify(f"Error generating image description: {str(e)}", severity="error")
+
+            # Schedule the error notification on the main thread
+            self.call_later(show_error)
+
+    async def generate_image_description_for_post(self):
+        """Generate a description of the image using OpenRouter API for the current post."""
+        # Run the description generation in a separate thread to prevent blocking
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            await loop.run_in_executor(executor, self.generate_image_description_sync)
 
     def flatten_comments(self, comments, level=0):
         """Flatten the comment tree for display."""
@@ -645,7 +859,7 @@ class RedditBrowserApp(App):
             self.notify(f"Entered: {self._number_buffer}", timeout=1.0)
 
             # Process the number after a short delay to allow multi-digit input
-            self.set_timer(1.0, self.process_entered_number)
+            self.set_timer(0.3, self.process_entered_number)  # Reduced from 1.0 to 0.3 seconds
             event.prevent_default()  # Prevent default handling
 
     def process_entered_number(self) -> None:
@@ -668,8 +882,8 @@ class RedditBrowserApp(App):
                     # Clear the buffer
                     self._number_buffer = ""
 
-                    # Schedule opening the comments for this post after the grid updates
-                    self.set_timer(0.1, lambda: self.open_post_comments(post_index))
+                    # Open the comments for this post immediately
+                    self.open_post_comments(post_index)
                 else:
                     self.notify(f"Invalid post number. Please enter a number between 1 and {len(self.posts)}.")
                     self._number_buffer = ""
