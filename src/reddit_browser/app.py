@@ -10,7 +10,7 @@ from textual.screen import ModalScreen
 import sys
 import os
 from .api import RedditAPI, get_first_two_pages, get_comments_tree
-from .media import is_image_url, open_image_in_viewer, generate_image_description, download_image, OPENAI_AVAILABLE, generate_text_summary
+from .media import is_image_url, open_image_in_viewer, generate_image_description, download_image, OPENAI_AVAILABLE, generate_text_summary, generate_ai_response
 from typing import List, Dict, Set
 import html
 import asyncio
@@ -25,6 +25,8 @@ from urllib.parse import urlparse
 import tempfile
 import subprocess
 import httpx
+import logging
+from datetime import datetime
 
 try:
     from term_image.image import from_url, from_file
@@ -111,17 +113,35 @@ class CommentScreen(ModalScreen):
         self.comments_per_page = 20  # Increased to show more comments
         self.current_comment_page = 0
         self.selected_comment_index = 0  # Track which comment is conceptually selected
+        self.last_input_value = ""  # Track the last input value
+        self.setup_logging()
+
+    def setup_logging(self):
+        """Setup file-based logging for debugging."""
+        log_filename = os.path.join(os.getcwd(), "reddbrowser_debug.log")
+        logging.basicConfig(
+            filename=log_filename,
+            level=logging.DEBUG,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            filemode='a'
+        )
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("CommentScreen initialized")
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the screen."""
         yield Header()
         yield Horizontal(
             VerticalScroll(self.label, id="comments_column"),
-            VerticalScroll(
-                Vertical(
-                    Static("[bold]AI Generated[/bold]", id="ai_header"),
-                    Label("", id="caption_content"),
-                    id="ai_column_container"
+            Vertical(
+                Static("[bold]AI Generated[/bold]", id="ai_header"),
+                VerticalScroll(
+                    Label("", id="caption_content", markup=True),
+                    id="ai_content_area"
+                ),
+                Horizontal(
+                    Input(placeholder="Ask about this post...", id="ai_prompt_input"),
+                    Button("Submit", variant="primary", id="ai_submit_button"),
                 ),
                 id="captions_column"
             ),
@@ -136,14 +156,202 @@ class CommentScreen(ModalScreen):
 
         # Style the columns to have equal width
         comments_col = self.query_one("#comments_column", VerticalScroll)
-        captions_col = self.query_one("#captions_column", VerticalScroll)
+        captions_col = self.query_one("#captions_column", Vertical)
         comments_col.styles.width = "1fr"
         captions_col.styles.width = "1fr"
         comments_col.styles.border = ("solid", "blue")
         captions_col.styles.border = ("solid", "green")
 
+        # Style the AI content area to take 80% of the column
+        ai_content_area = self.query_one("#ai_content_area", VerticalScroll)
+        ai_content_area.styles.height = "80%"
+
+        # Style the caption content label to wrap text
+        caption_content = self.query_one("#caption_content", Label)
+        caption_content.styles.width = "100%"
+        caption_content.styles.text_justify = "left"
+        caption_content.can_focus = False
+
+        # Style the prompt input and button
+        prompt_input = self.query_one("#ai_prompt_input", Input)
+        submit_button = self.query_one("#ai_submit_button", Button)
+
+        # Style the input and button
+        prompt_input.styles.width = "1fr"  # Take remaining space
+        submit_button.styles.width = "12"  # Fixed width for button
+        prompt_input.styles.height = "3"  # Fixed height for input
+        submit_button.styles.height = "3"  # Fixed height for button
+
+        prompt_input.can_focus = True
+        submit_button.can_focus = True
+
+        # Add some debugging to ensure widgets are properly configured
+        self.logger.info(f"Input widget: {prompt_input}, ID: {prompt_input.id}")
+        self.logger.info(f"Button widget: {submit_button}, ID: {submit_button.id}")
+
+        # Add event listener for the prompt input and ensure it gets focus
+        self.call_later(lambda: self.ensure_input_focus())
+
         # Load the post and comments
         self.call_later(self.load_comments)
+
+    def ensure_input_focus(self):
+        """Ensure the prompt input gets focus after a delay."""
+        try:
+            prompt_input = self.query_one("#ai_prompt_input", Input)
+            if prompt_input:
+                prompt_input.focus()
+                # Add a notification to confirm the input has focus
+                self.notify("Prompt input is ready for input", timeout=1)
+
+                # Ensure the input widget is properly configured
+                prompt_input.can_focus = True
+                prompt_input.focus()
+        except Exception as e:
+            self.logger.error(f"Error focusing input: {e}")
+
+
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle when any button is pressed."""
+        if event.button.id == "ai_submit_button":
+            self.handle_ai_submission()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle when any input is submitted (Enter pressed)."""
+        if event.input.id == "ai_prompt_input":
+            self.handle_ai_submission()
+
+    def handle_ai_submission(self) -> None:
+        """Centralized logic for submitting an AI prompt."""
+        input_widget = self.query_one("#ai_prompt_input", Input)
+        user_prompt = input_widget.value.strip()
+
+        if not OPENAI_AVAILABLE:
+            self.notify("OpenAI not available for AI interaction", severity="error")
+            return
+
+        if not user_prompt:
+            self.notify("Please enter a prompt", severity="warning")
+            return
+
+        # Clear the input field
+        input_widget.value = ""
+        
+        # Process the AI request
+        asyncio.create_task(self.process_ai_request(user_prompt))
+
+    def on_key(self, event: events.Key) -> None:
+        """Handle key press events."""
+        if event.key == "escape":
+            self.dismiss()
+        elif event.key == "j":
+            self.next_comment_page()
+        elif event.key == "k":
+            self.prev_comment_page()
+        elif event.key in ("+", "plus"):
+            self.expand_selected_comment()
+        elif event.key in ("-", "minus"):
+            self.collapse_selected_comment()
+        elif event.key == "down":
+            self.select_next_comment()
+        elif event.key == "up":
+            self.select_previous_comment()
+        elif event.key == "v":
+            # View image if this is an image post
+            if self.is_image_post(self.url) and TERM_IMAGE_AVAILABLE:
+                self.view_image()
+
+    async def process_ai_request(self, user_prompt: str):
+        """Process the AI request with post text, VLM caption, top 5 comments, and user prompt."""
+        try:
+            self.logger.info("Starting AI request processing")
+
+            # Notify that processing has started
+            self.notify("Processing your request with AI...", timeout=3)
+
+            # Show that we're processing in the AI column
+            self._update_caption_column("[yellow]AI is thinking...[/yellow]", append=True)
+
+            # Gather the required information
+            post_text = self.selftext if self.selftext.strip() else "No post text provided."
+
+            # Get the current caption/content in the AI column
+            caption_element = self.query_one("#caption_content", Label)
+            current_caption_content = str(caption_element.renderable) if hasattr(caption_element.renderable, '__str__') else ""
+
+            # Get top 5 comments
+            top_comments = self.get_top_comments()
+
+            # Prepare the full prompt for the LLM
+            full_prompt = f"""
+            Context about the Reddit post:
+            - Post text: {post_text}
+
+            AI-generated content about the post:
+            - {current_caption_content}
+
+            Top comments on the post:
+            {top_comments}
+
+            User's specific question:
+            {user_prompt}
+
+            Please provide a helpful response based on all this information.
+            """
+
+            self.logger.info("Calling generate_ai_response")
+
+            # Generate the response
+            response = await generate_ai_response(full_prompt)
+
+            self.logger.info("Received response from AI")
+
+            # Notify that the response has been received
+            self.notify("LLM response received! Updating display...", timeout=2)
+
+            # Append the response to the AI content
+            user_query_response = f"[bold magenta]Your Question:[/bold magenta] {user_prompt}\n\n[bold cyan]AI Response:[/bold cyan] {response}"
+            self._update_caption_column(user_query_response, append=True)
+
+            # Scroll to the bottom to show the new content
+            ai_content_area = self.query_one("#ai_content_area", VerticalScroll)
+            ai_content_area.scroll_end(animate=False)
+
+            self.logger.info("Successfully updated display with AI response")
+
+        except Exception as e:
+            self.logger.error(f"Error processing AI request: {str(e)}")
+
+            # Notify about the error
+            self.notify(f"Error processing AI request: {str(e)}", severity="error")
+
+            error_msg = f"\n\n[red]Error processing AI request: {str(e)}[/red]"
+            caption_element = self.query_one("#caption_content", Label)
+            current_content = str(caption_element.renderable) if hasattr(caption_element.renderable, '__str__') else ""
+            caption_scroll = self.query_one("#caption_content", Label)
+            caption_scroll.update(current_content + error_msg)
+
+    def get_top_comments(self) -> str:
+        """Extract the top 5 comments from the post."""
+        try:
+            # Get top-level comments (already sorted by score in build_comment_tree)
+            top_comments = []
+
+            # Limit to top 5 comments
+            for i, comment in enumerate(self.all_comments[:5]):
+                comment_author = comment["data"].get("author", "[deleted]")
+                comment_body = html.unescape(comment["data"].get("body", "")[:200])  # Limit length
+                comment_score = comment["data"].get("score", 0)
+
+                top_comments.append(f"{i+1}. Author: u/{comment_author}, Score: {comment_score}\n   Comment: {comment_body}")
+
+            if not top_comments:
+                return "No comments available."
+
+            return "\n".join(top_comments)
+        except Exception:
+            return "Could not retrieve comments."
 
     async def load_comments(self):
         """Load the post content and comments."""
@@ -317,27 +525,6 @@ class CommentScreen(ModalScreen):
         # Sort root comments by score descending
         root_comments.sort(key=lambda x: x["data"].get("score", 0), reverse=True)
         return root_comments
-
-    def on_key(self, event: events.Key) -> None:
-        """Handle key press events."""
-        if event.key == "escape":
-            self.dismiss()  # Use dismiss() for screens instead of pop_screen()
-        elif event.key == "j":
-            self.next_comment_page()
-        elif event.key == "k":
-            self.prev_comment_page()
-        elif event.key in ("+", "plus"):
-            self.expand_selected_comment()
-        elif event.key in ("-", "minus"):
-            self.collapse_selected_comment()
-        elif event.key == "down":
-            self.select_next_comment()
-        elif event.key == "up":
-            self.select_previous_comment()
-        elif event.key == "v":
-            # View image if this is an image post
-            if self.is_image_post(self.url) and TERM_IMAGE_AVAILABLE:
-                self.view_image()
 
     def select_next_comment(self):
         """Select the next comment."""
@@ -586,37 +773,67 @@ class CommentScreen(ModalScreen):
 
     def start_image_description_generation(self):
         """Start the image description generation after UI is displayed."""
+        self.logger.info("start_image_description_generation called")
         if OPENAI_AVAILABLE:
+            self.logger.info("OpenAI is available, starting image description")
             # Show notification that captioning is starting
             self.notify("Generating image description...")
+
+            # Update the caption area with loading message
+            caption_content = "[yellow]Generating image description...[/yellow]"
+            caption_scroll = self.query_one("#caption_content", Label)
+            caption_scroll.update(caption_content)
+            self.logger.info("Updated caption area with image description loading message")
+
             # Run the description generation in a separate thread to prevent blocking
             asyncio.create_task(self.run_vlm_in_thread())
+            self.logger.info("Started run_vlm_in_thread task")
+        else:
+            self.logger.error("OpenAI not available for image description")
 
     def start_text_summarization(self):
         """Start the text summarization after UI is displayed."""
+        self.logger.info("start_text_summarization called")
         if OPENAI_AVAILABLE:
+            self.logger.info("OpenAI is available, starting summarization")
             # Show notification that summarization is starting
             self.notify("Generating text summary...")
+
+            # Update the caption area with loading message
+            caption_content = "[yellow]Generating text summary...[/yellow]"
+            caption_scroll = self.query_one("#caption_content", Label)
+            caption_scroll.update(caption_content)
+            self.logger.info("Updated caption area with loading message")
+
             # Run the summarization asynchronously
             asyncio.create_task(self.run_text_summarization_async())
+            self.logger.info("Started run_text_summarization_async task")
+        else:
+            self.logger.error("OpenAI not available for text summarization")
 
     async def run_text_summarization_async(self):
         """Run the text summarization asynchronously."""
+        self.logger.info("run_text_summarization_async started")
         try:
             # Generate summary using the media module function
+            self.logger.info("Calling generate_text_summary")
             summary = await generate_text_summary(self.selftext)
+            self.logger.info(f"Received summary: {summary[:100]}...")  # Log first 100 chars
+
             if summary and not summary.startswith("Error"):
-                # Update the caption column with the summary
-                self._schedule_caption_update(summary, "text", "Text summary generated!")
+                self.logger.info("Summary received successfully, updating caption")
+                # Update the caption column with the summary (replace initial content)
+                self._schedule_caption_update(summary, "text", "Text summary generated!", append=False)
+                self.logger.info("Caption update scheduled")
             else:
+                self.logger.info(f"Error in summary: {summary}")
                 # Update with error message
                 error_content = f"[red]{summary}[/red]"
-                self.caption_label.update(error_content)
                 caption_scroll = self.query_one("#caption_content", Label)
                 caption_scroll.update(error_content)
         except Exception as e:
+            self.logger.error(f"Exception in run_text_summarization_async: {str(e)}")
             error_content = f"[red]Error in text summarization: {str(e)}[/red]"
-            self.caption_label.update(error_content)
             caption_scroll = self.query_one("#caption_content", Label)
             caption_scroll.update(error_content)
 
@@ -699,8 +916,10 @@ class CommentScreen(ModalScreen):
 
         return response.choices[0].message.content
 
-    def _update_caption_column(self, content, content_type="image"):
+    def _update_caption_column(self, content, content_type="image", append=False):
         """Helper method to update the caption column with the AI-generated content."""
+        self.logger.info(f"_update_caption_column called with content_type={content_type}, append={append}")
+
         # Determine the heading based on content type
         if content_type == "image":
             heading = "[bold blue]Image Caption:[/bold blue]\n"
@@ -709,24 +928,44 @@ class CommentScreen(ModalScreen):
         else:
             heading = ""
 
-        # Update the caption column with the content and heading
-        caption_content = f"{heading}[green]{content}[/green]"
+        # Get current content if we're appending
+        if append:
+            # Get current content from the actual DOM element
+            caption_element = self.query_one("#caption_content", Label)
+            current_content = str(caption_element.renderable) if hasattr(caption_element.renderable, '__str__') else ""
+            # Update the caption column by appending the new content
+            caption_content = f"{current_content}\n\n{heading}[green]{content}[/green]"
+        else:
+            # Replace the entire content
+            caption_content = f"{heading}[green]{content}[/green]"
 
-        # Update both the internal caption_label and the DOM element
-        self.caption_label.update(caption_content)
+        self.logger.info(f"Updating caption with content: {caption_content[:100]}...")  # First 100 chars
+
+        # Update the DOM element directly
         caption_scroll = self.query_one("#caption_content", Label)
         caption_scroll.update(caption_content)
+        self.logger.info("DOM element updated")
+
+        # Also update the internal caption_label for consistency
+        self.caption_label.update(caption_content)
+        self.logger.info("Internal caption_label updated")
 
         return caption_content
 
-    def _schedule_caption_update(self, description, content_type="image", success_msg="AI content generated!"):
+    def _schedule_caption_update(self, description, content_type="image", success_msg="AI content generated!", append=False):
         """Helper method to schedule caption updates on the main thread."""
+        self.logger.info(f"_schedule_caption_update called with content_type={content_type}, append={append}")
+
         # Use Textual's worker system to schedule updates on the main thread
         async def update_ui():
-            self._update_caption_column(description, content_type)
+            self.logger.info("Executing update_ui function")
+            self._update_caption_column(description, content_type, append)
+            self.logger.info("Caption column updated, sending notification")
             self.notify(success_msg)
+            self.logger.info("Notification sent")
 
         # Schedule the update on the main thread
+        self.logger.info("Scheduling update_ui function")
         self.call_later(update_ui)
 
     def _handle_image_description_error(self, error):
@@ -752,8 +991,8 @@ class CommentScreen(ModalScreen):
             if description is None:
                 return  # Error already notified
 
-            # Update the caption column with the description
-            self._schedule_caption_update(description, "image")
+            # Update the caption column with the description (replace initial content)
+            self._schedule_caption_update(description, "image", "Image caption generated!", append=False)
         except Exception as e:
             self._handle_image_description_error(e)
 
@@ -775,8 +1014,8 @@ class CommentScreen(ModalScreen):
             if description is None:
                 return  # Error already notified
 
-            # Update the caption column with the description
-            self._schedule_caption_update(description, "image")
+            # Update the caption column with the description (replace initial content)
+            self._schedule_caption_update(description, "image", "Image caption generated!", append=False)
         except Exception as e:
             self._handle_image_description_error(e)
 

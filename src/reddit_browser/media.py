@@ -168,3 +168,33 @@ async def generate_text_summary(text: str) -> str:
         return response.choices[0].message.content
     except Exception as e:
         return f"Error generating summary: {str(e)}"
+
+
+async def generate_ai_response(prompt: str) -> str:
+    """Generate a response to a custom prompt using the OpenRouter API."""
+    if not OPENAI_AVAILABLE:
+        return "Error: OpenAI library not installed."
+
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return "Error: OPENROUTER_API_KEY not set."
+
+    try:
+        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+
+        # Use a good general purpose model
+        model = os.getenv("AI_RESPONSE_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            max_tokens=1000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error generating AI response: {str(e)}"

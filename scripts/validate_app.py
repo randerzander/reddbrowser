@@ -8,10 +8,15 @@ def validate_application():
     print("Validating Reddit Browser Application...")
     
     try:
+        # Add src directory to path to allow imports
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
+
         # Test importing the API module
         from reddit_browser.api import RedditAPI, get_first_two_pages
         print("✓ API module imported successfully")
-        
+
         # Test importing the main application
         from reddit_browser.app import RedditBrowserApp, PostCard, main
         print("✓ Main application module imported successfully")

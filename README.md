@@ -5,17 +5,32 @@ A terminal-based TUI for browsing Reddit built with Textual. This was entirely v
 ## Usage
 
 ```bash
-python run.py [subreddit]
+python app.py [subreddit]
 ```
 
 Defaults to r/LocalLlama if no subreddit specified.
 
-## Vibe Dependencies
+## Prerequisites
 
-- textual
-- httpx
+Make sure you're running this in a real terminal environment (not in IDE terminals that don't properly handle input). The TUI requires a proper terminal to handle keyboard input.
 
-Install with `pip install -r requirements.txt`
+## Installation
+
+Install dependencies with:
+```bash
+pip install -r requirements.txt
+```
+
+For enhanced image viewing in terminal (optional):
+```bash
+pip install term-image
+```
+
+For AI features (optional):
+```bash
+pip install openai
+export OPENROUTER_API_KEY="your-api-key-here"
+```
 
 ## Controls
 
@@ -24,6 +39,11 @@ Install with `pip install -r requirements.txt`
 - `q`: Quit
 - `Enter`: Open post
 - Numbers: Jump to specific post
+- `j`/`k` in comments: Navigate comment pages
+- `↑`/`↓` in comments: Select comments
+- `+`/`-` in comments: Expand/collapse comments
+- `v` in comments: View image in GUI viewer
+- `ESC` in comments: Return to post list
 
 ## Notes
 
