@@ -2,23 +2,19 @@
 """Main application file for the Reddit Browser TUI."""
 
 from textual.app import App, ComposeResult
-from textual.containers import Grid, VerticalScroll, Horizontal, Center, Middle, ScrollableContainer, Vertical
-from textual.widgets import Static, Header, Footer, Button, Label, Input, DataTable
+from textual.containers import Grid, VerticalScroll, Horizontal, Vertical
+from textual.binding import Binding
+from textual.widgets import Static, Header, Footer, Button, Label, Input
 from textual import events
 from textual.message import Message
 from textual.screen import ModalScreen
-import sys
 import os
-from .api import RedditAPI, get_first_two_pages, get_comments_tree
-from .media import is_image_url, open_image_in_viewer, generate_image_description, download_image, OPENAI_AVAILABLE, generate_text_summary, generate_ai_response
-from typing import List, Dict, Set
+from .api import get_first_two_pages
+from .media import OPENAI_AVAILABLE, generate_text_summary, generate_ai_response
+from typing import Dict
 import html
 import asyncio
-import os
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from textual import work
-from textual.worker import Worker, get_current_worker
 import base64
 import requests
 from urllib.parse import urlparse
@@ -26,10 +22,9 @@ import tempfile
 import subprocess
 import httpx
 import logging
-from datetime import datetime
 
 try:
-    from term_image.image import from_url, from_file
+    import term_image.image as _term_image
     TERM_IMAGE_AVAILABLE = True
 except ImportError:
     TERM_IMAGE_AVAILABLE = False
@@ -96,6 +91,12 @@ class PostSelected(Message):
 class CommentScreen(ModalScreen):
     """Screen to display post comments."""
 
+    BINDINGS = [
+        ("ctrl+c", "app.quit", "Quit"),
+        ("ctrl+q", "ignore", "Disabled"),
+        Binding("ctrl+a", "toggle_ai_column", "Toggle AI Column", priority=True),
+    ]
+
     def __init__(self, post_data: Dict):
         super().__init__()
         self.post_data = post_data
@@ -114,6 +115,7 @@ class CommentScreen(ModalScreen):
         self.current_comment_page = 0
         self.selected_comment_index = 0  # Track which comment is conceptually selected
         self.last_input_value = ""  # Track the last input value
+        self._ai_column_visible = True
         self.setup_logging()
 
     def setup_logging(self):
@@ -127,6 +129,26 @@ class CommentScreen(ModalScreen):
         )
         self.logger = logging.getLogger(__name__)
         self.logger.info("CommentScreen initialized")
+
+    def action_ignore(self) -> None:
+        """Ignore a keybinding (used to disable defaults like Ctrl+Q)."""
+        return
+
+    def action_toggle_ai_column(self) -> None:
+        """Toggle visibility of the AI column."""
+        captions_col = self.query_one("#captions_column", Vertical)
+        comments_col = self.query_one("#comments_column", VerticalScroll)
+
+        self._ai_column_visible = not self._ai_column_visible
+        if self._ai_column_visible:
+            captions_col.styles.display = "block"
+            comments_col.styles.width = "1fr"
+            captions_col.styles.width = "1fr"
+        else:
+            captions_col.styles.display = "none"
+            comments_col.styles.width = "100%"
+
+        self.refresh(layout=True)
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the screen."""
@@ -161,6 +183,8 @@ class CommentScreen(ModalScreen):
         captions_col.styles.width = "1fr"
         comments_col.styles.border = ("solid", "blue")
         captions_col.styles.border = ("solid", "green")
+        self.label.styles.width = "100%"
+        self.label.styles.text_wrap = "wrap"
 
         # Style the AI content area to take 80% of the column
         ai_content_area = self.query_one("#ai_content_area", VerticalScroll)
@@ -353,6 +377,20 @@ class CommentScreen(ModalScreen):
         except Exception:
             return "Could not retrieve comments."
 
+    def _set_caption_content(self, content: str) -> None:
+        """Update caption content in the UI and internal label."""
+        self.caption_label.update(content)
+        caption_scroll = self.query_one("#caption_content", Label)
+        caption_scroll.update(content)
+
+    def _set_caption_for_generation(self, loading_message: str, start_fn, unavailable_message: str) -> None:
+        """Set loading UI, then kick off generation if available."""
+        self._set_caption_content(loading_message)
+        if OPENAI_AVAILABLE:
+            self.call_later(start_fn)
+        else:
+            self._set_caption_content(unavailable_message)
+
     async def load_comments(self):
         """Load the post content and comments."""
         try:
@@ -366,8 +404,7 @@ class CommentScreen(ModalScreen):
                 response.raise_for_status()
                 data = response.json()
 
-                # Extract post and comments data
-                post_info = data[0]["data"]["children"][0]["data"]
+                # Extract comments data
                 comments_data = data[1]["data"]["children"] if len(data) > 1 else []
 
                 # Build a tree structure for nested comments
@@ -380,61 +417,23 @@ class CommentScreen(ModalScreen):
                 has_selftext = bool(self.selftext.strip())
                 is_image = self.is_image_post(self.url)
 
-                if is_image and has_selftext:
-                    # Both image and text - prioritize image captioning
-                    # Initialize caption area with loading message
-                    caption_content = "[yellow]Generating image caption...[/yellow]"
-                    self.caption_label.update(caption_content)
-
-                    # Update the caption column in the DOM
-                    caption_scroll = self.query_one("#caption_content", Label)
-                    caption_scroll.update(caption_content)
-
-                    # Check if OpenAI is available to generate the caption
-                    if OPENAI_AVAILABLE:
-                        # Schedule the description generation to happen after the content is displayed
-                        self.call_later(self.start_image_description_generation)
-                    else:
-                        # Update caption area with error message if OpenAI is not available
-                        caption_content = "[red]OpenAI not available for caption generation[/red]"
-                        self.caption_label.update(caption_content)
-                        caption_scroll.update(caption_content)
-                elif is_image:
-                    # Image post only - generate image caption
-                    caption_content = "[yellow]Generating image caption...[/yellow]"
-                    self.caption_label.update(caption_content)
-
-                    caption_scroll = self.query_one("#caption_content", Label)
-                    caption_scroll.update(caption_content)
-
-                    if OPENAI_AVAILABLE:
-                        self.call_later(self.start_image_description_generation)
-                    else:
-                        caption_content = "[red]OpenAI not available for caption generation[/red]"
-                        self.caption_label.update(caption_content)
-                        caption_scroll.update(caption_content)
+                if is_image:
+                    # Image post (with or without text) - generate image caption
+                    self._set_caption_for_generation(
+                        "[yellow]Generating image caption...[/yellow]",
+                        self.start_image_description_generation,
+                        "[red]OpenAI not available for caption generation[/red]",
+                    )
                 elif has_selftext:
                     # Text post only - generate text summary
-                    caption_content = "[yellow]Generating text summary...[/yellow]"
-                    self.caption_label.update(caption_content)
-
-                    caption_scroll = self.query_one("#caption_content", Label)
-                    caption_scroll.update(caption_content)
-
-                    if OPENAI_AVAILABLE:
-                        # Schedule text summary generation
-                        self.call_later(self.start_text_summarization)
-                    else:
-                        caption_content = "[red]OpenAI not available for text summarization[/red]"
-                        self.caption_label.update(caption_content)
-                        caption_scroll.update(caption_content)
+                    self._set_caption_for_generation(
+                        "[yellow]Generating text summary...[/yellow]",
+                        self.start_text_summarization,
+                        "[red]OpenAI not available for text summarization[/red]",
+                    )
                 else:
                     # Neither image nor text - show placeholder
-                    caption_content = "[blue]No content to summarize[/blue]"
-                    self.caption_label.update(caption_content)
-
-                    caption_scroll = self.query_one("#caption_content", Label)
-                    caption_scroll.update(caption_content)
+                    self._set_caption_content("[blue]No content to summarize[/blue]")
 
                 # Display the first page of comments
                 self.display_comments()
@@ -458,11 +457,7 @@ class CommentScreen(ModalScreen):
 
             # Update caption panel with error or placeholder
             caption_content = f"[red]Error loading AI content: {str(e)}[/red]"
-            self.caption_label.update(caption_content)
-
-            # Update the caption column in the DOM
-            caption_scroll = self.query_one("#caption_content", Label)
-            caption_scroll.update(caption_content)
+            self._set_caption_content(caption_content)
 
     def expand_all_comments(self):
         """Initially expand all comments that have replies."""
@@ -1047,6 +1042,8 @@ class RedditBrowserApp(App):
     """A Textual app for browsing Reddit."""
     
     BINDINGS = [
+        ("ctrl+c", "quit", "Quit"),
+        ("ctrl+q", "ignore", "Disabled"),
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
         ("j", "next_page", "Next 20 Posts"),
@@ -1060,6 +1057,10 @@ class RedditBrowserApp(App):
         self.current_page = 0
         self.posts_per_page = 20
         self._number_buffer = ""
+
+    def action_ignore(self) -> None:
+        """Ignore a keybinding (used to disable defaults like Ctrl+Q)."""
+        return
     
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
