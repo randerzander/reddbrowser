@@ -11,7 +11,7 @@ from textual.screen import ModalScreen
 import os
 from .api import get_first_two_pages
 from .media import OPENAI_AVAILABLE, generate_text_summary, generate_ai_response
-from typing import Dict
+from typing import Dict, Optional
 import html
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +22,10 @@ import tempfile
 import subprocess
 import httpx
 import logging
+import re
+import shutil
+import sys
+from rich.markup import escape as rich_escape
 
 try:
     import term_image.image as _term_image
@@ -33,6 +37,68 @@ try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None  # Define as None if not available
+
+
+LINK_PATTERN = re.compile(r"(https?://[^\s\]\)<>\"']+)", re.IGNORECASE)
+
+
+def linkify(text: str) -> str:
+    """Escape text and wrap plain URLs in Rich link markup."""
+    if not text:
+        return text
+
+    text = rich_escape(text)
+
+    def _wrap(match: re.Match) -> str:
+        url = match.group(1)
+        safe_url = url.replace('"', "%22")
+        safe_text = rich_escape(url)
+        return f"[link=\"{safe_url}\"]{safe_text}[/link]"
+
+    return LINK_PATTERN.sub(_wrap, text)
+
+
+def _copy_external(text: str) -> bool:
+    """Copy text to clipboard using external utilities if available."""
+    if shutil.which("wl-copy"):
+        subprocess.run(["wl-copy"], input=text, text=True, check=False)
+        return True
+    if shutil.which("xclip"):
+        subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=False)
+        return True
+    if shutil.which("xsel"):
+        subprocess.run(["xsel", "--clipboard", "--input"], input=text, text=True, check=False)
+        return True
+    if shutil.which("pbcopy"):
+        subprocess.run(["pbcopy"], input=text, text=True, check=False)
+        return True
+    return False
+
+
+def _copy_osc52(text: str) -> bool:
+    """Copy to clipboard via OSC 52 terminal escape sequence."""
+    try:
+        data = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        sys.stdout.write(f"\x1b]52;c;{data}\x07")
+        sys.stdout.flush()
+        return True
+    except Exception:
+        return False
+
+
+def copy_text_to_clipboard(text: str, app: Optional[App] = None) -> bool:
+    """Try app clipboard, external tools, then OSC52."""
+    if app is not None:
+        copy_fn = getattr(app, "copy_to_clipboard", None)
+        if callable(copy_fn):
+            try:
+                copy_fn(text)
+                return True
+            except Exception:
+                pass
+    if _copy_external(text):
+        return True
+    return _copy_osc52(text)
 
 
 class PostCard(Static, can_focus=True):
@@ -286,6 +352,17 @@ class CommentScreen(ModalScreen):
             if self.is_image_post(self.url) and TERM_IMAGE_AVAILABLE:
                 self.view_image()
 
+    def on_link_clicked(self, event) -> None:
+        """Copy clicked links to the clipboard."""
+        link = getattr(event, "link", None) or getattr(event, "href", None)
+        if not link:
+            return
+        if copy_text_to_clipboard(link, app=self.app):
+            self.notify("Copied link to clipboard", timeout=1.5)
+        else:
+            self.notify("Clipboard copy not available", severity="error")
+        event.stop()
+
     async def process_ai_request(self, user_prompt: str):
         """Process the AI request with post text, VLM caption, top 5 comments, and user prompt."""
         try:
@@ -444,11 +521,11 @@ class CommentScreen(ModalScreen):
                 f"Author: u/[green]{self.author}[/green]\n"
                 f"Score: [green]{self.score}[/green]\n"
                 f"Comments: [green]{self.num_comments}[/green]\n"
-                f"URL: [green]{self.url}[/green]\n\n"
+                f"URL: [green]{linkify(self.url)}[/green]\n\n"
             )
 
             if self.selftext.strip():
-                error_content += f"Content:\n[green]{self.selftext}[/green]\n\n"
+                error_content += f"Content:\n[green]{linkify(self.selftext)}[/green]\n\n"
 
             error_content += f"[red]Error loading comments: {str(e)}[/red]\n\n"
             error_content += "[yellow]Press ESC to return[/yellow]"
@@ -614,21 +691,21 @@ class CommentScreen(ModalScreen):
             f"Author: u/[green]{self.author}[/green]\n"
             f"Score: [green]{self.score}[/green]\n"
             f"Comments: [green]{self.num_comments}[/green]\n"
-            f"URL: [green]{self.url}[/green]\n\n"
+            f"URL: [green]{linkify(self.url)}[/green]\n\n"
         )
 
         # If it's an image post and term-image is available, show a message about image display
         if is_image_post and TERM_IMAGE_AVAILABLE:
             content += f"[bold]IMAGE POST:[/bold]\n"
-            content += f"[green]This is an image post: {self.url}[/green]\n"
+            content += f"[green]This is an image post: {linkify(self.url)}[/green]\n"
             content += f"[yellow]Press 'v' to open image in GUI viewer (feh, eog, etc.)[/yellow]\n\n"
         elif is_image_post and not TERM_IMAGE_AVAILABLE:
-            content += f"[green]This is an image post: {self.url}[/green]\n"
+            content += f"[green]This is an image post: {linkify(self.url)}[/green]\n"
             content += "[yellow]Install term-image to view images in terminal[/yellow]\n\n"
         else:
             # Regular post content
             if self.selftext.strip():
-                content += f"Content:\n[green]{self.selftext}[/green]\n\n"
+                content += f"Content:\n[green]{linkify(self.selftext)}[/green]\n\n"
 
         content += "[bold]COMMENTS:[/bold]\n\n"
 
@@ -638,6 +715,7 @@ class CommentScreen(ModalScreen):
             comment_data = comment["data"]
             author = comment_data.get("author", "[deleted]")
             body = html.unescape(comment_data.get("body", "")[:200])  # Limit length
+            body = linkify(body)
             score = comment_data.get("score", 0)
             level = comment["level"]
 
