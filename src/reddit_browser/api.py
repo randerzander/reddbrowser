@@ -1,16 +1,19 @@
 """Reddit Browser - A textual TUI for browsing Reddit"""
 
 import httpx
+import logging
 from typing import Dict, List, Optional, Any
 import html
+from .http_headers import get_default_headers
 
 
 class RedditAPI:
     """A simple client for interacting with the Reddit API."""
     
-    def __init__(self, user_agent: str = "RedditBrowser/0.1.0"):
+    def __init__(self, user_agent: Optional[str] = None):
         self.base_url = "https://www.reddit.com"
-        self.headers = {"User-Agent": user_agent}
+        self.headers = get_default_headers(user_agent)
+        self.logger = logging.getLogger(__name__)
         self.client = httpx.Client(
             headers=self.headers,
             timeout=10.0
@@ -26,8 +29,9 @@ class RedditAPI:
         params = {"limit": limit}
         if after:
             params["after"] = after
-            
+        self.logger.debug("Requesting subreddit posts: url=%s params=%s headers=%s", url, params, self.headers)
         response = self.client.get(url, params=params)
+        self.logger.debug("Response status: %s headers=%s", response.status_code, response.headers)
         response.raise_for_status()
         return response.json()
 
@@ -37,15 +41,18 @@ class RedditAPI:
         params = {"limit": limit}
         if after:
             params["after"] = after
-            
+        self.logger.debug("Requesting subreddit posts (async): url=%s params=%s headers=%s", url, params, self.headers)
         response = await self.async_client.get(url, params=params)
+        self.logger.debug("Response status (async): %s headers=%s", response.status_code, response.headers)
         response.raise_for_status()
         return response.json()
 
     async def get_comments_async(self, permalink: str) -> List[Dict]:
         """Fetch comments for a post (async)."""
         url = f"{self.base_url}{permalink}.json"
+        self.logger.debug("Requesting comments: url=%s headers=%s", url, self.headers)
         response = await self.async_client.get(url)
+        self.logger.debug("Comments response status: %s headers=%s", response.status_code, response.headers)
         response.raise_for_status()
         return response.json()
 

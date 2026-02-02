@@ -3,6 +3,7 @@
 import os
 import base64
 import httpx
+from .http_headers import get_default_headers
 import tempfile
 import subprocess
 from typing import Optional, List, Dict, Any
@@ -46,7 +47,7 @@ def is_image_url(url: str) -> bool:
 async def download_image(url: str) -> Optional[str]:
     """Download an image to a temporary file and return its path."""
     try:
-        async with httpx.AsyncClient(headers={"User-Agent": "RedditBrowser/0.1.0"}) as client:
+        async with httpx.AsyncClient(headers=get_default_headers()) as client:
             response = await client.get(url)
             response.raise_for_status()
 
@@ -100,7 +101,7 @@ async def generate_image_description(url: str = None, image_path: str = None) ->
             with open(image_path, "rb") as f:
                 image_data = base64.b64encode(f.read()).decode('utf-8')
         elif url:
-            async with httpx.AsyncClient(headers={"User-Agent": "RedditBrowser/0.1.0"}) as client:
+            async with httpx.AsyncClient(headers=get_default_headers()) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 image_data = base64.b64encode(response.content).decode('utf-8')

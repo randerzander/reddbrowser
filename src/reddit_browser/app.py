@@ -11,6 +11,7 @@ from textual.screen import ModalScreen
 import os
 from .api import get_first_two_pages
 from .media import OPENAI_AVAILABLE, generate_text_summary, generate_ai_response
+from .http_headers import get_default_headers
 from typing import Dict, Optional
 import html
 import asyncio
@@ -182,6 +183,7 @@ class CommentScreen(ModalScreen):
         self.selected_comment_index = 0  # Track which comment is conceptually selected
         self.last_input_value = ""  # Track the last input value
         self._ai_column_visible = True
+        self._config = None
         self.setup_logging()
 
     def setup_logging(self):
@@ -195,6 +197,45 @@ class CommentScreen(ModalScreen):
         )
         self.logger = logging.getLogger(__name__)
         self.logger.info("CommentScreen initialized")
+
+    def _parse_config(self, path: str) -> Dict:
+        if not path or not os.path.exists(path):
+            return {}
+
+        config: Dict[str, str] = {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if ":" not in line:
+                        continue
+                    key, value = line.split(":", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key:
+                        config[key] = value
+        except Exception:
+            return {}
+
+        return config
+
+    def _get_config(self) -> Dict:
+        if self._config is None:
+            config_path = os.getenv("REDD_BROWSER_CONFIG", "config.yaml")
+            self._config = self._parse_config(config_path)
+        return self._config
+
+    def _get_vlm_model(self) -> str:
+        env_model = os.getenv("VLM_MODEL")
+        if env_model:
+            return env_model
+        config = self._get_config()
+        config_model = config.get("vlm_model") if config else None
+        if config_model:
+            return config_model
+        return "qwen/qwen-2.5-vl-7b-instruct:free"
 
     def action_ignore(self) -> None:
         """Ignore a keybinding (used to disable defaults like Ctrl+Q)."""
@@ -318,7 +359,7 @@ class CommentScreen(ModalScreen):
         user_prompt = input_widget.value.strip()
 
         if not OPENAI_AVAILABLE:
-            self.notify("OpenAI not available for AI interaction", severity="error")
+            self.notify("OpenAI not available for AI interaction", severity="error", timeout=10)
             return
 
         if not user_prompt:
@@ -425,7 +466,7 @@ class CommentScreen(ModalScreen):
             self.logger.error(f"Error processing AI request: {str(e)}")
 
             # Notify about the error
-            self.notify(f"Error processing AI request: {str(e)}", severity="error")
+            self.notify(f"Error processing AI request: {str(e)}", severity="error", timeout=10)
 
             error_msg = f"\n\n[red]Error processing AI request: {str(e)}[/red]"
             caption_element = self.query_one("#caption_content", Label)
@@ -474,7 +515,7 @@ class CommentScreen(ModalScreen):
 
             # Fetch comments from Reddit API
             url = f"https://www.reddit.com{self.permalink}.json"
-            headers = {"User-Agent": "RedditBrowser/0.1.0"}
+            headers = get_default_headers()
 
             async with httpx.AsyncClient(headers=headers, timeout=10.0) as client:
                 response = await client.get(url)
@@ -782,7 +823,7 @@ class CommentScreen(ModalScreen):
         """Display the image using feh (GUI image viewer) and generate description."""
         try:
             # Download the image to a temporary file
-            response = requests.get(self.url, headers={"User-Agent": "RedditBrowser/0.1.0"})
+            response = requests.get(self.url, headers=get_default_headers())
             response.raise_for_status()
 
             # Get file extension from URL
@@ -827,7 +868,7 @@ class CommentScreen(ModalScreen):
                     continue  # Viewer not installed, try next one
 
             if not viewer_used:
-                self.notify("No image viewer found. Install 'feh' or 'eog'", severity="error")
+                self.notify("No image viewer found. Install 'feh' or 'eog'", severity="error", timeout=10)
                 # Clean up the temporary file if no viewer is found
                 os.unlink(temp_path)
                 return
@@ -842,7 +883,7 @@ class CommentScreen(ModalScreen):
                 self.notify("OpenAI not available. Install with: pip install openai", severity="warning")
 
         except Exception as e:
-            self.notify(f"Error preparing image for viewer: {str(e)}", severity="error")
+            self.notify(f"Error preparing image for viewer: {str(e)}", severity="error", timeout=10)
 
     def start_image_description_generation(self):
         """Start the image description generation after UI is displayed."""
@@ -943,13 +984,13 @@ class CommentScreen(ModalScreen):
 
         # Check if OpenAI is available before proceeding
         if OpenAI is None:
-            self.notify("OpenAI library not available. Install with: pip install openai", severity="error")
+            self.notify("OpenAI library not available. Install with: pip install openai", severity="error", timeout=10)
             return None
 
         # Get the API key from environment variable
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
-            self.notify("OPENROUTER_API_KEY not set in environment", severity="error")
+            self.notify("OPENROUTER_API_KEY not set in environment", severity="error", timeout=10)
             return None
 
         # Initialize the OpenAI client with OpenRouter
@@ -966,7 +1007,7 @@ class CommentScreen(ModalScreen):
 
         # Call the model to generate a description
         response = client.chat.completions.create(
-            model="qwen/qwen-2.5-vl-7b-instruct:free",
+            model=self._get_vlm_model(),
             messages=[
                 {
                     "role": "user",
@@ -987,7 +1028,47 @@ class CommentScreen(ModalScreen):
             max_tokens=500
         )
 
-        return response.choices[0].message.content
+        return self._extract_response_content(response)
+
+    def _extract_response_content(self, response):
+        """Extract text content from OpenAI-style responses with provider quirks."""
+        try:
+            message = response.choices[0].message
+        except Exception:
+            message = None
+
+        content = None
+        if message is not None:
+            try:
+                content = message.content
+            except Exception:
+                content = None
+
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text")
+                    if text:
+                        parts.append(text)
+            content = "\n".join(parts) if parts else None
+
+        if (not content or not str(content).strip()) and message is not None:
+            for field in ("output_text", "text", "reasoning"):
+                value = getattr(message, field, None)
+                if value and str(value).strip():
+                    content = value
+                    break
+
+        if not content or not str(content).strip():
+            try:
+                payload = response.model_dump()
+            except Exception:
+                payload = repr(response)
+            self.logger.error("Empty response content. Raw response: %s", payload)
+            return None
+
+        return str(content).strip()
 
     def _update_caption_column(self, content, content_type="image", append=False):
         """Helper method to update the caption column with the AI-generated content."""
@@ -1044,7 +1125,7 @@ class CommentScreen(ModalScreen):
     def _handle_image_description_error(self, error):
         """Helper method to handle image description errors."""
         async def show_error():
-            self.notify(f"Error generating image description: {str(error)}", severity="error")
+            self.notify(f"Error generating image description: {str(error)}", severity="error", timeout=10)
 
         # Schedule the error notification on the main thread
         self.call_later(show_error)
@@ -1073,7 +1154,7 @@ class CommentScreen(ModalScreen):
         """Synchronous version of image description generation to run in a thread."""
         try:
             # Download the image from the post URL
-            response = requests.get(self.url, headers={"User-Agent": "RedditBrowser/0.1.0"})
+            response = requests.get(self.url, headers=get_default_headers())
             response.raise_for_status()
 
             # Encode the image to base64
@@ -1163,7 +1244,7 @@ class RedditBrowserApp(App):
             # Update the grid
             self.update_grid()
         except Exception as e:
-            self.notify(f"Error loading posts: {str(e)}", severity="error")
+            self.notify(f"Error loading posts: {str(e)}", severity="error", timeout=10)
     
     def update_grid(self) -> None:
         """Update the grid with current posts."""
