@@ -101,6 +101,15 @@ def copy_text_to_clipboard(text: str, app: Optional[App] = None) -> bool:
         return True
     return _copy_osc52(text)
 
+def _clipboard_warning() -> Optional[str]:
+    if (
+        shutil.which("wl-copy")
+        or shutil.which("xclip")
+        or shutil.which("xsel")
+        or shutil.which("pbcopy")
+    ):
+        return None
+    return "Clipboard tool not found. Install xclip (X11) or wl-clipboard (Wayland)."
 
 class PostCard(Static, can_focus=True):
     """Widget to display a single Reddit post that can be focused."""
@@ -302,6 +311,10 @@ class CommentScreen(ModalScreen):
         caption_content.styles.width = "100%"
         caption_content.styles.text_justify = "left"
         caption_content.can_focus = False
+
+        warning = _clipboard_warning()
+        if warning:
+            self.notify(warning, severity="warning", timeout=8)
 
         # Style the prompt input and button
         prompt_input = self.query_one("#ai_prompt_input", Input)
