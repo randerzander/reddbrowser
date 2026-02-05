@@ -8,12 +8,22 @@ import tempfile
 import subprocess
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
+import asyncio
+import requests
+import re
+import html as html_lib
 
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
+
+try:
+    from readability import Document as ReadabilityDocument
+    READABILITY_AVAILABLE = True
+except ImportError:
+    READABILITY_AVAILABLE = False
 
 # Common image extensions
 IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']
@@ -136,6 +146,51 @@ async def generate_image_description(url: str = None, image_path: str = None) ->
     except Exception as e:
         return f"Error generating description: {str(e)}"
 
+def _html_to_text(html: str) -> str:
+    if not html:
+        return ""
+    html = re.sub(r"(?is)<(script|style).*?>.*?</\\1>", " ", html)
+    html = re.sub(r"(?i)<br\\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</p>", "\n\n", html)
+    html = re.sub(r"(?s)<.*?>", " ", html)
+    html = html_lib.unescape(html)
+    html = re.sub(r"[ \\t\\r\\f\\v]+", " ", html)
+    html = re.sub(r"\\n\\n\\n+", "\n\n", html)
+    return html.strip()
+
+def extract_article_text_sync(url: str) -> str:
+    """Extract main article text from a URL using requests + pyreadability."""
+    if not READABILITY_AVAILABLE:
+        return "Error: pyreadability not installed."
+    if not url or not url.startswith("http"):
+        return "Error: Invalid URL."
+
+    try:
+        response = requests.get(url, headers=get_default_headers(), timeout=10)
+        response.raise_for_status()
+
+        doc = ReadabilityDocument(response.text)
+        title = (doc.title() or "").strip()
+
+        try:
+            summary_html = doc.summary(html_partial=True)
+        except TypeError:
+            summary_html = doc.summary()
+
+        text = _html_to_text(summary_html)
+        if title and title not in text:
+            text = f"{title}\n\n{text}"
+
+        if not text.strip():
+            return "Error: Article extraction produced no text."
+        return text.strip()
+    except Exception as e:
+        return f"Error fetching article: {str(e)}"
+
+async def extract_article_text(url: str) -> str:
+    """Async wrapper to extract article text without blocking the event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, extract_article_text_sync, url)
 
 async def generate_text_summary(text: str) -> str:
     """Generate a summary of the provided text using the Nvidia Nemotron model via OpenRouter API."""

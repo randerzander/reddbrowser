@@ -5,3 +5,5 @@ black>=23.0.0
 flake8>=6.0.0
 term-image>=0.4.0
 openai>=1.0.0
+requests>=2.31.0
+git+https://github.com/randerzander/pyreadability.git

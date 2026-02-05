@@ -10,7 +10,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 import os
 from .api import get_first_two_pages
-from .media import OPENAI_AVAILABLE, generate_text_summary, generate_ai_response
+from .media import OPENAI_AVAILABLE, generate_text_summary, generate_ai_response, extract_article_text
 from .http_headers import get_default_headers
 from typing import Dict, Optional
 import html
@@ -563,8 +563,16 @@ class CommentScreen(ModalScreen):
                         "[red]OpenAI not available for text summarization[/red]",
                     )
                 else:
-                    # Neither image nor text - show placeholder
-                    self._set_caption_content("[blue]No content to summarize[/blue]")
+                    # Link post - attempt to fetch and summarize article content
+                    if self.url and self.url.startswith("http"):
+                        self._set_caption_for_generation(
+                            "[yellow]Fetching article content...[/yellow]",
+                            self.start_article_summarization,
+                            "[red]OpenAI not available for article summarization[/red]",
+                        )
+                    else:
+                        # Neither image nor text - show placeholder
+                        self._set_caption_content("[blue]No content to summarize[/blue]")
 
                 # Display the first page of comments
                 self.display_comments()
@@ -760,6 +768,8 @@ class CommentScreen(ModalScreen):
             # Regular post content
             if self.selftext.strip():
                 content += f"Content:\n[green]{linkify(self.selftext)}[/green]\n\n"
+            else:
+                content += "[yellow]Link post detected: article summary will appear in the AI panel.[/yellow]\n\n"
 
         content += "[bold]COMMENTS:[/bold]\n\n"
 
@@ -938,6 +948,23 @@ class CommentScreen(ModalScreen):
         else:
             self.logger.error("OpenAI not available for text summarization")
 
+    def start_article_summarization(self):
+        """Start the article summarization after UI is displayed."""
+        self.logger.info("start_article_summarization called")
+        if OPENAI_AVAILABLE:
+            self.logger.info("OpenAI is available, starting article summarization")
+            self.notify("Fetching article content...")
+
+            caption_content = "[yellow]Fetching article content...[/yellow]"
+            caption_scroll = self.query_one("#caption_content", Label)
+            caption_scroll.update(caption_content)
+            self.logger.info("Updated caption area with article fetch loading message")
+
+            asyncio.create_task(self.run_article_summarization_async())
+            self.logger.info("Started run_article_summarization_async task")
+        else:
+            self.logger.error("OpenAI not available for article summarization")
+
     async def run_text_summarization_async(self):
         """Run the text summarization asynchronously."""
         self.logger.info("run_text_summarization_async started")
@@ -961,6 +988,39 @@ class CommentScreen(ModalScreen):
         except Exception as e:
             self.logger.error(f"Exception in run_text_summarization_async: {str(e)}")
             error_content = f"[red]Error in text summarization: {str(e)}[/red]"
+            caption_scroll = self.query_one("#caption_content", Label)
+            caption_scroll.update(error_content)
+
+    async def run_article_summarization_async(self):
+        """Fetch article content and generate a summary asynchronously."""
+        self.logger.info("run_article_summarization_async started")
+        try:
+            self.logger.info("Calling extract_article_text")
+            article_text = await extract_article_text(self.url)
+            self.logger.info(f"Received article text: {article_text[:100]}...")
+
+            if not article_text or article_text.startswith("Error"):
+                error_content = f"[red]{article_text or 'Error fetching article content.'}[/red]"
+                caption_scroll = self.query_one("#caption_content", Label)
+                caption_scroll.update(error_content)
+                return
+
+            caption_scroll = self.query_one("#caption_content", Label)
+            caption_scroll.update("[yellow]Summarizing article content...[/yellow]")
+
+            self.logger.info("Calling generate_text_summary for article")
+            summary = await generate_text_summary(article_text)
+            self.logger.info(f"Received article summary: {summary[:100]}...")
+
+            if summary and not summary.startswith("Error"):
+                self._schedule_caption_update(summary, "text", "Article summary generated!", append=False)
+            else:
+                error_content = f"[red]{summary}[/red]"
+                caption_scroll = self.query_one("#caption_content", Label)
+                caption_scroll.update(error_content)
+        except Exception as e:
+            self.logger.error(f"Exception in run_article_summarization_async: {str(e)}")
+            error_content = f"[red]Error in article summarization: {str(e)}[/red]"
             caption_scroll = self.query_one("#caption_content", Label)
             caption_scroll.update(error_content)
 
