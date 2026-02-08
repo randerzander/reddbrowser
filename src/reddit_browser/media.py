@@ -202,10 +202,6 @@ async def generate_text_summary(text: str) -> str:
         return "Error: OPENROUTER_API_KEY not set."
 
     try:
-        # Limit text length to avoid token limits
-        if len(text) > 2000:  # Rough character limit
-            text = text[:2000] + "... (truncated)"
-
         client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
 
         # Use the Nvidia Nemotron model
@@ -219,11 +215,46 @@ async def generate_text_summary(text: str) -> str:
                     "content": f"Please provide a concise summary of the following text:\n\n{text}\n\nSummary:"
                 }
             ],
-            max_tokens=300
+            max_tokens=1000
         )
         return response.choices[0].message.content
     except Exception as e:
         return f"Error generating summary: {str(e)}"
+
+async def generate_comments_summary(comments_text: str) -> str:
+    """Generate a concise summary of the top comments using the Nvidia Nemotron model via OpenRouter API."""
+    if not OPENAI_AVAILABLE:
+        return "Error: OpenAI library not installed."
+
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return "Error: OPENROUTER_API_KEY not set."
+
+    try:
+        # Limit text length to avoid token limits
+        if len(comments_text) > 4000:  # Rough character limit
+            comments_text = comments_text[:4000] + "... (truncated)"
+
+        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+
+        # Use the same model as text summarization
+        model = os.getenv("TEXT_SUMMARY_MODEL", "nvidia/nemotron-3-nano-30b-a3b:free")
+
+        prompt = (
+            "Summarize the key points, sentiments, and disagreements in these top comments. "
+            "Keep it concise and readable in 5-8 short bullets.\n\n"
+            f"{comments_text}\n\n"
+            "Summary:"
+        )
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error generating comment summary: {str(e)}"
 
 
 async def generate_ai_response(prompt: str) -> str:
@@ -238,8 +269,8 @@ async def generate_ai_response(prompt: str) -> str:
     try:
         client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
 
-        # Use a good general purpose model
-        model = os.getenv("AI_RESPONSE_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+        # Use the same model as text summarization to avoid rate-limit disparities
+        model = os.getenv("AI_RESPONSE_MODEL", os.getenv("TEXT_SUMMARY_MODEL", "nvidia/nemotron-3-nano-30b-a3b:free"))
 
         response = client.chat.completions.create(
             model=model,

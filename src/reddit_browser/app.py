@@ -10,7 +10,13 @@ from textual.message import Message
 from textual.screen import ModalScreen
 import os
 from .api import get_first_two_pages
-from .media import OPENAI_AVAILABLE, generate_text_summary, generate_ai_response, extract_article_text
+from .media import (
+    OPENAI_AVAILABLE,
+    generate_text_summary,
+    generate_comments_summary,
+    generate_ai_response,
+    extract_article_text,
+)
 from .http_headers import get_default_headers
 from typing import Dict, Optional
 import html
@@ -27,6 +33,8 @@ import re
 import shutil
 import sys
 from rich.markup import escape as rich_escape
+from rich.text import Text
+from rich.markup import render as render_markup
 
 try:
     import term_image.image as _term_image
@@ -57,6 +65,27 @@ def linkify(text: str) -> str:
         return f"[link=\"{safe_url}\"]{safe_text}[/link]"
 
     return LINK_PATTERN.sub(_wrap, text)
+
+
+def _disable_all_logging() -> None:
+    """Disable all logging, including httpx/httpcore, to keep the TUI clean."""
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+    root_logger.addHandler(logging.NullHandler())
+    root_logger.propagate = False
+    logging.disable(logging.CRITICAL)
+
+    for name in ("httpx", "httpcore", "httpcore.connection", "textual", "rich", "openai"):
+        logger = logging.getLogger(name)
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+        logger.addHandler(logging.NullHandler())
+        logger.propagate = False
+        logger.disabled = True
+
+
+_disable_all_logging()
 
 
 def _copy_external(text: str) -> bool:
@@ -126,13 +155,16 @@ class PostCard(Static, can_focus=True):
         self.url = post_data["data"]["url"]
         self.permalink = post_data["data"]["permalink"]
         self.selftext = html.unescape(post_data["data"].get("selftext", ""))
+        self.selftext_html = post_data["data"].get("selftext_html", "") or ""
+        if not self.selftext.strip() and self.selftext_html:
+            self.selftext = self._html_to_text(self.selftext_html)
 
         # Truncate selftext if too long
         if len(self.selftext) > 100:
             self.selftext = self.selftext[:97] + "..."
 
         # Simple content display - just the title in green
-        content = f"[green]{self.numbered_title}[/green]"
+        content = f"[green]{rich_escape(self.numbered_title)}[/green]"
         self.update(content)
 
     def on_click(self) -> None:
@@ -185,27 +217,21 @@ class CommentScreen(ModalScreen):
         self.selftext = html.unescape(post_data["data"].get("selftext", ""))
         self.label = Label("")
         self.caption_label = Label("")  # For VLM captions
+        self.caption_content_text = ""  # Source of truth for caption content
         self.all_comments = []  # Store all comments
         self.expanded_comments = set()  # Track expanded comments
         self.comments_per_page = 20  # Increased to show more comments
         self.current_comment_page = 0
         self.selected_comment_index = 0  # Track which comment is conceptually selected
         self.last_input_value = ""  # Track the last input value
-        self._ai_column_visible = True
+        self._ai_column_visible = False
         self._config = None
         self.setup_logging()
 
     def setup_logging(self):
         """Setup file-based logging for debugging."""
-        log_filename = os.path.join(os.getcwd(), "reddbrowser_debug.log")
-        logging.basicConfig(
-            filename=log_filename,
-            level=logging.DEBUG,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            filemode='a'
-        )
         self.logger = logging.getLogger(__name__)
-        self.logger.info("CommentScreen initialized")
+        self.logger.disabled = True
 
     def _parse_config(self, path: str) -> Dict:
         if not path or not os.path.exists(path):
@@ -252,10 +278,14 @@ class CommentScreen(ModalScreen):
 
     def action_toggle_ai_column(self) -> None:
         """Toggle visibility of the AI column."""
+        self._ai_column_visible = not self._ai_column_visible
+        self._apply_ai_column_visibility()
+
+    def _apply_ai_column_visibility(self) -> None:
+        """Apply current AI column visibility to the layout."""
         captions_col = self.query_one("#captions_column", Vertical)
         comments_col = self.query_one("#comments_column", VerticalScroll)
 
-        self._ai_column_visible = not self._ai_column_visible
         if self._ai_column_visible:
             captions_col.styles.display = "block"
             comments_col.styles.width = "1fr"
@@ -299,6 +329,7 @@ class CommentScreen(ModalScreen):
         captions_col.styles.width = "1fr"
         comments_col.styles.border = ("solid", "blue")
         captions_col.styles.border = ("solid", "green")
+        self._apply_ai_column_visibility()
         self.label.styles.width = "100%"
         self.label.styles.text_wrap = "wrap"
 
@@ -432,8 +463,7 @@ class CommentScreen(ModalScreen):
             post_text = self.selftext if self.selftext.strip() else "No post text provided."
 
             # Get the current caption/content in the AI column
-            caption_element = self.query_one("#caption_content", Label)
-            current_caption_content = str(caption_element.renderable) if hasattr(caption_element.renderable, '__str__') else ""
+            current_caption_content = self._get_caption_content()
 
             # Get top 5 comments
             top_comments = self.get_top_comments()
@@ -482,19 +512,17 @@ class CommentScreen(ModalScreen):
             self.notify(f"Error processing AI request: {str(e)}", severity="error", timeout=10)
 
             error_msg = f"\n\n[red]Error processing AI request: {str(e)}[/red]"
-            caption_element = self.query_one("#caption_content", Label)
-            current_content = str(caption_element.renderable) if hasattr(caption_element.renderable, '__str__') else ""
-            caption_scroll = self.query_one("#caption_content", Label)
-            caption_scroll.update(current_content + error_msg)
+            current_content = self._get_caption_content()
+            self._set_caption_content(current_content + error_msg)
 
-    def get_top_comments(self) -> str:
-        """Extract the top 5 comments from the post."""
+    def get_top_comments(self, limit: int = 10) -> str:
+        """Extract the top comments from the post."""
         try:
             # Get top-level comments (already sorted by score in build_comment_tree)
             top_comments = []
 
-            # Limit to top 5 comments
-            for i, comment in enumerate(self.all_comments[:5]):
+            # Limit to top comments
+            for i, comment in enumerate(self.all_comments[:limit]):
                 comment_author = comment["data"].get("author", "[deleted]")
                 comment_body = html.unescape(comment["data"].get("body", "")[:200])  # Limit length
                 comment_score = comment["data"].get("score", 0)
@@ -510,10 +538,30 @@ class CommentScreen(ModalScreen):
 
     def _set_caption_content(self, content: str) -> None:
         """Update caption content in the UI and internal label."""
-        self.caption_label.update(content)
+        self.caption_content_text = content or ""
+        self._update_label_safe(self.caption_label, content)
         caption_scroll = self.query_one("#caption_content", Label)
-        caption_scroll.update(content)
+        self._update_label_safe(caption_scroll, content)
 
+    def _get_caption_content(self) -> str:
+        """Get the current caption content tracked by the screen."""
+        return self.caption_content_text or ""
+
+    def _update_label_safe(self, label: Label, content: str) -> None:
+        """Update a Rich/markup label, falling back to plain text on any error."""
+        try:
+            label.update(render_markup(content))
+        except Exception:
+            # Fall back to plain text renderable (no markup parsing).
+            label.update(Text(content))
+
+    def _html_to_text(self, content_html: str) -> str:
+        """Best-effort conversion of HTML content to plain text."""
+        if not content_html:
+            return ""
+        # Strip tags with a simple regex to avoid extra deps here.
+        text = re.sub(r"<[^>]+>", " ", content_html)
+        return html.unescape(" ".join(text.split()))
     def _set_caption_for_generation(self, loading_message: str, start_fn, unavailable_message: str) -> None:
         """Set loading UI, then kick off generation if available."""
         self._set_caption_content(loading_message)
@@ -579,8 +627,8 @@ class CommentScreen(ModalScreen):
 
         except Exception as e:
             error_content = (
-                f"[bold][green]{self.title}[/green][/bold]\n\n"
-                f"Author: u/[green]{self.author}[/green]\n"
+                f"[bold][green]{rich_escape(self.title)}[/green][/bold]\n\n"
+                f"Author: u/[green]{rich_escape(self.author)}[/green]\n"
                 f"Score: [green]{self.score}[/green]\n"
                 f"Comments: [green]{self.num_comments}[/green]\n"
                 f"URL: [green]{linkify(self.url)}[/green]\n\n"
@@ -592,7 +640,7 @@ class CommentScreen(ModalScreen):
             error_content += f"[red]Error loading comments: {str(e)}[/red]\n\n"
             error_content += "[yellow]Press ESC to return[/yellow]"
 
-            self.label.update(error_content)
+            self._update_label_safe(self.label, error_content)
 
             # Update caption panel with error or placeholder
             caption_content = f"[red]Error loading AI content: {str(e)}[/red]"
@@ -749,8 +797,8 @@ class CommentScreen(ModalScreen):
 
         # Format the content
         content = (
-            f"[bold][green]{self.title}[/green][/bold]\n\n"
-            f"Author: u/[green]{self.author}[/green]\n"
+            f"[bold][green]{rich_escape(self.title)}[/green][/bold]\n\n"
+            f"Author: u/[green]{rich_escape(self.author)}[/green]\n"
             f"Score: [green]{self.score}[/green]\n"
             f"Comments: [green]{self.num_comments}[/green]\n"
             f"URL: [green]{linkify(self.url)}[/green]\n\n"
@@ -778,6 +826,7 @@ class CommentScreen(ModalScreen):
             comment = flattened_comments[i]
             comment_data = comment["data"]
             author = comment_data.get("author", "[deleted]")
+            safe_author = rich_escape(author)
             body = html.unescape(comment_data.get("body", "")[:200])  # Limit length
             body = linkify(body)
             score = comment_data.get("score", 0)
@@ -796,10 +845,10 @@ class CommentScreen(ModalScreen):
             # Highlight the selected comment
             is_selected = (i == self.selected_comment_index)
             if is_selected:
-                content += f"{indent}{expand_indicator}[red on white]Comment by u/{author} (Score: {score}):[/red on white]\n"
+                content += f"{indent}{expand_indicator}[red on white]Comment by u/{safe_author} (Score: {score}):[/red on white]\n"
                 content += f"{indent}[red on white]{body}[/red on white]\n\n"
             else:
-                content += f"{indent}{expand_indicator}Comment by u/[yellow]{author}[/yellow] (Score: {score}):\n"
+                content += f"{indent}{expand_indicator}Comment by u/[yellow]{safe_author}[/yellow] (Score: {score}):\n"
                 content += f"{indent}[green]{body}[/green]\n\n"
 
         # Add pagination info
@@ -807,7 +856,7 @@ class CommentScreen(ModalScreen):
         content += f"[yellow]Page {self.current_comment_page + 1} of {total_pages}[/yellow] | "
         content += f"[yellow]j/k: page up/down, ↑/↓: select comment, +/-: expand/collapse, v: view image in GUI, ESC: return[/yellow]"
 
-        self.label.update(content)
+        self._update_label_safe(self.label, content)
 
     def is_image_post(self, url: str) -> bool:
         """Check if the post URL points to an image."""
@@ -918,8 +967,7 @@ class CommentScreen(ModalScreen):
 
             # Update the caption area with loading message
             caption_content = "[yellow]Generating image description...[/yellow]"
-            caption_scroll = self.query_one("#caption_content", Label)
-            caption_scroll.update(caption_content)
+            self._set_caption_content(caption_content)
             self.logger.info("Updated caption area with image description loading message")
 
             # Run the description generation in a separate thread to prevent blocking
@@ -938,8 +986,7 @@ class CommentScreen(ModalScreen):
 
             # Update the caption area with loading message
             caption_content = "[yellow]Generating text summary...[/yellow]"
-            caption_scroll = self.query_one("#caption_content", Label)
-            caption_scroll.update(caption_content)
+            self._set_caption_content(caption_content)
             self.logger.info("Updated caption area with loading message")
 
             # Run the summarization asynchronously
@@ -956,8 +1003,7 @@ class CommentScreen(ModalScreen):
             self.notify("Fetching article content...")
 
             caption_content = "[yellow]Fetching article content...[/yellow]"
-            caption_scroll = self.query_one("#caption_content", Label)
-            caption_scroll.update(caption_content)
+            self._set_caption_content(caption_content)
             self.logger.info("Updated caption area with article fetch loading message")
 
             asyncio.create_task(self.run_article_summarization_async())
@@ -979,17 +1025,40 @@ class CommentScreen(ModalScreen):
                 # Update the caption column with the summary (replace initial content)
                 self._schedule_caption_update(summary, "text", "Text summary generated!", append=False)
                 self.logger.info("Caption update scheduled")
+
+                # Summarize the top comments and append to the AI panel
+                top_comments_text = self.get_top_comments(limit=10)
+                if top_comments_text.startswith("No comments"):
+                    self._schedule_caption_update(
+                        "No comments available to summarize.",
+                        "comments",
+                        "Top comments summary skipped.",
+                        append=True,
+                    )
+                else:
+                    self.logger.info("Calling generate_comments_summary")
+                    comments_summary = await generate_comments_summary(top_comments_text)
+                    if comments_summary and not comments_summary.startswith("Error"):
+                        self._schedule_caption_update(
+                            comments_summary,
+                            "comments",
+                            "Top comments summary generated!",
+                            append=True,
+                        )
+                    else:
+                        self.logger.info(f"Error in comments summary: {comments_summary}")
+                        current_content = self._get_caption_content()
+                        error_content = f"{current_content}\n\n[red]{comments_summary}[/red]"
+                        self._set_caption_content(error_content)
             else:
                 self.logger.info(f"Error in summary: {summary}")
                 # Update with error message
                 error_content = f"[red]{summary}[/red]"
-                caption_scroll = self.query_one("#caption_content", Label)
-                caption_scroll.update(error_content)
+                self._set_caption_content(error_content)
         except Exception as e:
             self.logger.error(f"Exception in run_text_summarization_async: {str(e)}")
             error_content = f"[red]Error in text summarization: {str(e)}[/red]"
-            caption_scroll = self.query_one("#caption_content", Label)
-            caption_scroll.update(error_content)
+            self._set_caption_content(error_content)
 
     async def run_article_summarization_async(self):
         """Fetch article content and generate a summary asynchronously."""
@@ -1001,12 +1070,10 @@ class CommentScreen(ModalScreen):
 
             if not article_text or article_text.startswith("Error"):
                 error_content = f"[red]{article_text or 'Error fetching article content.'}[/red]"
-                caption_scroll = self.query_one("#caption_content", Label)
-                caption_scroll.update(error_content)
+                self._set_caption_content(error_content)
                 return
 
-            caption_scroll = self.query_one("#caption_content", Label)
-            caption_scroll.update("[yellow]Summarizing article content...[/yellow]")
+            self._set_caption_content("[yellow]Summarizing article content...[/yellow]")
 
             self.logger.info("Calling generate_text_summary for article")
             summary = await generate_text_summary(article_text)
@@ -1152,14 +1219,15 @@ class CommentScreen(ModalScreen):
             heading = "[bold blue]Image Caption:[/bold blue]\n"
         elif content_type == "text":
             heading = "[bold green]Text Summary:[/bold green]\n"
+        elif content_type == "comments":
+            heading = "[bold cyan]Top Comments Summary:[/bold cyan]\n"
         else:
             heading = ""
 
         # Get current content if we're appending
         if append:
             # Get current content from the actual DOM element
-            caption_element = self.query_one("#caption_content", Label)
-            current_content = str(caption_element.renderable) if hasattr(caption_element.renderable, '__str__') else ""
+            current_content = self._get_caption_content()
             # Update the caption column by appending the new content
             caption_content = f"{current_content}\n\n{heading}[green]{content}[/green]"
         else:
@@ -1169,13 +1237,11 @@ class CommentScreen(ModalScreen):
         self.logger.info(f"Updating caption with content: {caption_content[:100]}...")  # First 100 chars
 
         # Update the DOM element directly
-        caption_scroll = self.query_one("#caption_content", Label)
-        caption_scroll.update(caption_content)
-        self.logger.info("DOM element updated")
-
-        # Also update the internal caption_label for consistency
-        self.caption_label.update(caption_content)
-        self.logger.info("Internal caption_label updated")
+        if not self._ai_column_visible:
+            self._ai_column_visible = True
+            self._apply_ai_column_visibility()
+        self._set_caption_content(caption_content)
+        self.logger.info("Caption content updated")
 
         return caption_content
 
