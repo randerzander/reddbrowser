@@ -439,6 +439,16 @@ class CommentScreen(ModalScreen):
             self.open_gallery_first_image()
         elif self.is_image_post(self.url) and TERM_IMAGE_AVAILABLE:
             self.view_image()
+        elif self.url:
+            self.open_url_in_browser()
+
+    def open_url_in_browser(self) -> None:
+        """Open the post URL in the default browser."""
+        try:
+            subprocess.Popen(["xdg-open", self.url])
+            self.notify("Opened link in browser")
+        except FileNotFoundError:
+            self.notify("xdg-open not found. Install xdg-utils.", severity="error", timeout=8)
 
     def on_link_clicked(self, event) -> None:
         """Copy clicked links to the clipboard."""
@@ -1464,7 +1474,7 @@ class RedditBrowserApp(App):
         """Load posts from the subreddit."""
         try:
             # Get first two pages of posts
-            all_posts = get_first_two_pages(self.subreddit)
+            all_posts = get_first_two_pages(self.subreddit, user_agent=os.getenv("REDDIT_USER_AGENT"))
             self.posts = [post for post in all_posts if not post["data"].get("stickied", False)]
             
             # Reset to first page when loading new posts

@@ -10,8 +10,8 @@ from .http_headers import get_default_headers
 class RedditAPI:
     """A simple client for interacting with the Reddit API."""
     
-    def __init__(self, user_agent: Optional[str] = None):
-        self.base_url = "https://www.reddit.com"
+    def __init__(self, user_agent: Optional[str] = None, base_url: str = "https://www.reddit.com"):
+        self.base_url = base_url
         self.headers = get_default_headers(user_agent)
         self.logger = logging.getLogger(__name__)
         self.client = httpx.Client(
@@ -128,11 +128,19 @@ class RedditAPI:
         await self.async_client.aclose()
 
 
-def get_first_two_pages(subreddit: str) -> List[Dict]:
+def get_first_two_pages(subreddit: str, user_agent: Optional[str] = None) -> List[Dict]:
     """Get the first two pages of posts from a subreddit (sync)."""
-    reddit = RedditAPI()
+    reddit = RedditAPI(user_agent=user_agent)
     try:
-        first_page = reddit.get_subreddit_posts(subreddit, limit=25)
+        try:
+            first_page = reddit.get_subreddit_posts(subreddit, limit=25)
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 403:
+                reddit.close()
+                reddit = RedditAPI(user_agent=user_agent, base_url="https://old.reddit.com")
+                first_page = reddit.get_subreddit_posts(subreddit, limit=25)
+            else:
+                raise
         posts = first_page["data"]["children"]
         
         after_token = first_page["data"].get("after")

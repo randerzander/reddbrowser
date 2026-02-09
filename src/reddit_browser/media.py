@@ -8,6 +8,7 @@ import tempfile
 import subprocess
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
+import re
 import asyncio
 import requests
 import re
@@ -141,11 +142,11 @@ async def generate_image_description(url: str = None, image_path: str = None) ->
                         ]
                     }
                 ],
-                max_tokens=500
+                max_tokens=3000
             )
 
         response = await asyncio.to_thread(_call)
-        return response.choices[0].message.content
+        return _strip_thinking(response.choices[0].message.content)
     except Exception as e:
         return f"Error generating description: {str(e)}"
 
@@ -219,11 +220,11 @@ async def generate_text_summary(text: str) -> str:
                         "content": f"Please provide a concise summary of the following text:\n\n{text}\n\nSummary:"
                     }
                 ],
-                max_tokens=1000
+                max_tokens=3000
             )
 
         response = await asyncio.to_thread(_call)
-        return response.choices[0].message.content
+        return _strip_thinking(response.choices[0].message.content)
     except Exception as e:
         return f"Error generating summary: {str(e)}"
 
@@ -261,7 +262,7 @@ async def generate_comments_summary(comments_text: str) -> str:
             )
 
         response = await asyncio.to_thread(_call)
-        return response.choices[0].message.content
+        return _strip_thinking(response.choices[0].message.content)
     except Exception as e:
         return f"Error generating comment summary: {str(e)}"
 
@@ -294,6 +295,15 @@ async def generate_ai_response(prompt: str) -> str:
             )
 
         response = await asyncio.to_thread(_call)
-        return response.choices[0].message.content
+        return _strip_thinking(response.choices[0].message.content)
     except Exception as e:
         return f"Error generating AI response: {str(e)}"
+def _strip_thinking(text: str) -> str:
+    """Remove model thinking traces from responses."""
+    if not text:
+        return text
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", text)
+    cleaned = re.sub(r"(?is)<thinking>.*?</thinking>", "", cleaned)
+    cleaned = re.sub(r"(?is)```thinking.*?```", "", cleaned)
+    cleaned = re.sub(r"(?is)^\\s*(reasoning|thinking):.*?(\\n\\n|$)", "", cleaned)
+    return cleaned.strip()
