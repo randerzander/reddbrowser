@@ -288,14 +288,17 @@ class CommentScreen(ModalScreen):
         """Apply current AI column visibility to the layout."""
         captions_col = self.query_one("#captions_column", Vertical)
         comments_col = self.query_one("#comments_column", VerticalScroll)
+        prompt_input = self.query_one("#ai_prompt_input", Input)
 
         if self._ai_column_visible:
             captions_col.styles.display = "block"
             comments_col.styles.width = "1fr"
             captions_col.styles.width = "1fr"
+            prompt_input.can_focus = True
         else:
             captions_col.styles.display = "none"
             comments_col.styles.width = "100%"
+            prompt_input.can_focus = False
 
         self.refresh(layout=True)
 
@@ -360,31 +363,23 @@ class CommentScreen(ModalScreen):
         prompt_input.styles.height = "3"  # Fixed height for input
         submit_button.styles.height = "3"  # Fixed height for button
 
-        prompt_input.can_focus = True
+        prompt_input.can_focus = False
         submit_button.can_focus = True
 
         # Add some debugging to ensure widgets are properly configured
         self.logger.info(f"Input widget: {prompt_input}, ID: {prompt_input.id}")
         self.logger.info(f"Button widget: {submit_button}, ID: {submit_button.id}")
 
-        # Add event listener for the prompt input and ensure it gets focus
-        self.call_later(lambda: self.ensure_input_focus())
-
-        # Load the post and comments
-        self.call_later(self.load_comments)
+        # Load the post and comments without blocking the UI thread
+        self.call_later(lambda: asyncio.create_task(self.load_comments()))
 
     def ensure_input_focus(self):
         """Ensure the prompt input gets focus after a delay."""
         try:
             prompt_input = self.query_one("#ai_prompt_input", Input)
             if prompt_input:
-                prompt_input.focus()
-                # Add a notification to confirm the input has focus
-                self.notify("Prompt input is ready for input", timeout=1)
-
                 # Ensure the input widget is properly configured
                 prompt_input.can_focus = True
-                prompt_input.focus()
         except Exception as e:
             self.logger.error(f"Error focusing input: {e}")
 

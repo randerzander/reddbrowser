@@ -129,19 +129,22 @@ async def generate_image_description(url: str = None, image_path: str = None) ->
         # Use the same model as before
         model = os.getenv("VLM_MODEL", "qwen/qwen-2.5-vl-7b-instruct:free")
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Describe this image in detail."},
-                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}}
-                    ]
-                }
-            ],
-            max_tokens=500
-        )
+        def _call():
+            return client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe this image in detail."},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}}
+                        ]
+                    }
+                ],
+                max_tokens=500
+            )
+
+        response = await asyncio.to_thread(_call)
         return response.choices[0].message.content
     except Exception as e:
         return f"Error generating description: {str(e)}"
@@ -207,16 +210,19 @@ async def generate_text_summary(text: str) -> str:
         # Use the Nvidia Nemotron model
         model = os.getenv("TEXT_SUMMARY_MODEL", "nvidia/nemotron-3-nano-30b-a3b:free")
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Please provide a concise summary of the following text:\n\n{text}\n\nSummary:"
-                }
-            ],
-            max_tokens=1000
-        )
+        def _call():
+            return client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"Please provide a concise summary of the following text:\n\n{text}\n\nSummary:"
+                    }
+                ],
+                max_tokens=1000
+            )
+
+        response = await asyncio.to_thread(_call)
         return response.choices[0].message.content
     except Exception as e:
         return f"Error generating summary: {str(e)}"
@@ -247,11 +253,14 @@ async def generate_comments_summary(comments_text: str) -> str:
             "Summary:"
         )
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=300
-        )
+        def _call():
+            return client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300
+            )
+
+        response = await asyncio.to_thread(_call)
         return response.choices[0].message.content
     except Exception as e:
         return f"Error generating comment summary: {str(e)}"
@@ -272,16 +281,19 @@ async def generate_ai_response(prompt: str) -> str:
         # Use the same model as text summarization to avoid rate-limit disparities
         model = os.getenv("AI_RESPONSE_MODEL", os.getenv("TEXT_SUMMARY_MODEL", "nvidia/nemotron-3-nano-30b-a3b:free"))
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            max_tokens=1000
-        )
+        def _call():
+            return client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                max_tokens=1000
+            )
+
+        response = await asyncio.to_thread(_call)
         return response.choices[0].message.content
     except Exception as e:
         return f"Error generating AI response: {str(e)}"
