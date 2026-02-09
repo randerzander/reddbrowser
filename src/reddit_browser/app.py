@@ -16,6 +16,8 @@ from .media import (
     generate_comments_summary,
     generate_ai_response,
     extract_article_text,
+    download_image,
+    open_image_in_viewer,
 )
 from .http_headers import get_default_headers
 from typing import Dict, Optional
@@ -203,6 +205,7 @@ class CommentScreen(ModalScreen):
         ("ctrl+c", "app.quit", "Quit"),
         ("ctrl+q", "ignore", "Disabled"),
         Binding("ctrl+a", "toggle_ai_column", "Toggle AI Column", priority=True),
+        Binding("v", "view_image", "View Image/Gallery", priority=True),
     ]
 
     def __init__(self, post_data: Dict):
@@ -433,9 +436,14 @@ class CommentScreen(ModalScreen):
         elif event.key == "up":
             self.select_previous_comment()
         elif event.key == "v":
-            # View image if this is an image post
-            if self.is_image_post(self.url) and TERM_IMAGE_AVAILABLE:
-                self.view_image()
+            self.action_view_image()
+
+    def action_view_image(self) -> None:
+        """View image or gallery based on the current post."""
+        if self.is_gallery_post():
+            self.open_gallery_first_image()
+        elif self.is_image_post(self.url) and TERM_IMAGE_AVAILABLE:
+            self.view_image()
 
     def on_link_clicked(self, event) -> None:
         """Copy clicked links to the clipboard."""
@@ -890,6 +898,93 @@ class CommentScreen(ModalScreen):
                 return True
 
         return False
+
+    def is_gallery_post(self) -> bool:
+        """Check if the post is a Reddit gallery."""
+        data = self.post_data.get("data", {})
+        if data.get("is_gallery") and data.get("media_metadata"):
+            return True
+        url = (data.get("url") or "").lower()
+        return "/gallery/" in url and bool(data.get("media_metadata") or data.get("gallery_data"))
+
+    def _get_gallery_first_image_url(self) -> Optional[str]:
+        """Get the first image URL from a Reddit gallery post."""
+        data = self.post_data.get("data", {})
+        if not data.get("is_gallery"):
+            url = (data.get("url") or "").lower()
+            if "/gallery/" not in url:
+                return None
+
+        media_metadata = data.get("media_metadata")
+        gallery_data = data.get("gallery_data")
+
+        if not media_metadata:
+            try:
+                permalink = data.get("permalink")
+                api_url = None
+                if permalink:
+                    api_url = f"https://www.reddit.com{permalink}.json"
+                else:
+                    url = data.get("url") or ""
+                    match = re.search(r"/gallery/([a-z0-9]+)", url, re.IGNORECASE)
+                    if match:
+                        post_id = match.group(1)
+                        api_url = f"https://www.reddit.com/comments/{post_id}.json"
+
+                if api_url:
+                    response = requests.get(api_url, headers=get_default_headers(), timeout=10)
+                    response.raise_for_status()
+                    listing = response.json()
+                    if listing and isinstance(listing, list) and listing[0].get("data", {}).get("children"):
+                        post_data = listing[0]["data"]["children"][0]["data"]
+                        media_metadata = post_data.get("media_metadata")
+                        gallery_data = post_data.get("gallery_data")
+            except Exception:
+                media_metadata = media_metadata or {}
+                gallery_data = gallery_data or {}
+
+        media_metadata = media_metadata or {}
+        gallery_data = gallery_data or {}
+        items = gallery_data.get("items") or []
+
+        media_id = None
+        if items:
+            media_id = items[0].get("media_id")
+        if not media_id and media_metadata:
+            media_id = next(iter(media_metadata.keys()), None)
+        if not media_id:
+            return None
+
+        meta = media_metadata.get(media_id) or {}
+        url = None
+        if isinstance(meta.get("s"), dict):
+            url = meta["s"].get("u")
+        if not url and isinstance(meta.get("p"), list) and meta["p"]:
+            url = meta["p"][-1].get("u")
+        if not url:
+            return None
+
+        return html.unescape(url)
+
+    def open_gallery_first_image(self) -> None:
+        """Open the first image in a Reddit gallery using an image viewer."""
+        url = self._get_gallery_first_image_url()
+        if not url:
+            self.notify("Gallery image not available.", severity="error", timeout=5)
+            return
+
+        async def _open_async():
+            image_path = await download_image(url)
+            if not image_path:
+                self.notify("Failed to download gallery image.", severity="error", timeout=6)
+                return
+            viewer_used = open_image_in_viewer(image_path)
+            if not viewer_used:
+                self.notify("No image viewer found. Install 'feh' or 'eog'", severity="error", timeout=10)
+                return
+            self.notify(f"Opened gallery image with {viewer_used}")
+
+        asyncio.create_task(_open_async())
 
     def view_image(self):
         """Display the image using feh (GUI image viewer) and generate description."""
