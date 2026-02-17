@@ -9,7 +9,7 @@ from textual import events
 from textual.message import Message
 from textual.screen import ModalScreen
 import os
-from .api import get_first_two_pages
+from .api import get_first_two_pages, RedditAPI
 from .media import (
     OPENAI_AVAILABLE,
     generate_text_summary,
@@ -29,7 +29,6 @@ import requests
 from urllib.parse import urlparse
 import tempfile
 import subprocess
-import httpx
 import logging
 import re
 import shutil
@@ -588,13 +587,11 @@ class CommentScreen(ModalScreen):
         try:
 
             # Fetch comments from Reddit API
-            url = f"https://www.reddit.com{self.permalink}.json"
-            headers = get_default_headers()
-
-            async with httpx.AsyncClient(headers=headers, timeout=10.0) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                data = response.json()
+            reddit = RedditAPI()
+            try:
+                data = await reddit.get_comments_async(self.permalink)
+            finally:
+                await reddit.aclose()
 
                 # Extract comments data
                 comments_data = data[1]["data"]["children"] if len(data) > 1 else []
@@ -937,9 +934,11 @@ class CommentScreen(ModalScreen):
                         api_url = f"https://www.reddit.com/comments/{post_id}.json"
 
                 if api_url:
-                    response = requests.get(api_url, headers=get_default_headers(), timeout=10)
-                    response.raise_for_status()
-                    listing = response.json()
+                    reddit = RedditAPI()
+                    try:
+                        listing = reddit.get_json(api_url)
+                    finally:
+                        reddit.close()
                     if listing and isinstance(listing, list) and listing[0].get("data", {}).get("children"):
                         post_data = listing[0]["data"]["children"][0]["data"]
                         media_metadata = post_data.get("media_metadata")
@@ -1446,6 +1445,7 @@ class RedditBrowserApp(App):
         ("r", "refresh", "Refresh"),
         ("j", "next_page", "Next 20 Posts"),
         ("k", "prev_page", "Previous 20 Posts"),
+        ("n", "next_subreddit", "Next Subreddit"),
     ]
     
     def __init__(self, subreddit: str = "LocalLlama"):
@@ -1455,6 +1455,38 @@ class RedditBrowserApp(App):
         self.current_page = 0
         self.posts_per_page = 20
         self._number_buffer = ""
+        self._subreddits = self._load_subreddits()
+        self._subreddit_index = self._resolve_subreddit_index()
+
+    def _get_subreddits_path(self) -> str:
+        app_dir = os.path.dirname(__file__)
+        project_root = os.path.dirname(os.path.dirname(app_dir))
+        return os.path.join(project_root, "subreddits.txt")
+
+    def _load_subreddits(self) -> list:
+        path = self._get_subreddits_path()
+        if not os.path.exists(path):
+            return []
+        subreddits = []
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    subreddits.append(line)
+        except Exception:
+            return []
+        return subreddits
+
+    def _resolve_subreddit_index(self) -> int:
+        if not self._subreddits:
+            return -1
+        lowered = [item.lower() for item in self._subreddits]
+        try:
+            return lowered.index(self.subreddit.lower())
+        except ValueError:
+            return -1
 
     def action_ignore(self) -> None:
         """Ignore a keybinding (used to disable defaults like Ctrl+Q)."""
@@ -1542,6 +1574,23 @@ class RedditBrowserApp(App):
             self.current_page -= 1
             self.update_grid()
             self.notify(f"Showing posts {(self.current_page * self.posts_per_page) + 1}-{min((self.current_page + 1) * self.posts_per_page, len(self.posts))}")
+
+    def action_next_subreddit(self) -> None:
+        """Switch to the next subreddit in subreddits.txt."""
+        if not self._subreddits:
+            self.notify("No subreddits.txt list found.", severity="error", timeout=4)
+            return
+        if self._subreddit_index < 0:
+            next_index = 0
+        else:
+            next_index = (self._subreddit_index + 1) % len(self._subreddits)
+        next_subreddit = self._subreddits[next_index]
+        if next_subreddit.lower() == self.subreddit.lower():
+            return
+        self.subreddit = next_subreddit
+        self._subreddit_index = next_index
+        self.load_posts()
+        self.notify(f"Switched to r/{self.subreddit}")
 
     def on_key(self, event: events.Key) -> None:
         """Handle key press events, including number input for direct post selection."""

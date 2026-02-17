@@ -20,9 +20,21 @@ DEFAULT_USER_AGENTS: Sequence[str] = (
 )
 
 
+_CACHED_USER_AGENT: Optional[str] = None
+
+
 def get_user_agent(user_agent: Optional[str] = None) -> str:
-    """Return the provided UA, env override, or a random default."""
-    return user_agent or os.getenv("REDDIT_USER_AGENT") or random.choice(DEFAULT_USER_AGENTS)
+    """Return the provided UA, env override, or a cached random default."""
+    if user_agent:
+        return user_agent
+    env_agent = os.getenv("REDDIT_USER_AGENT")
+    if env_agent:
+        return env_agent
+
+    global _CACHED_USER_AGENT
+    if not _CACHED_USER_AGENT:
+        _CACHED_USER_AGENT = random.choice(DEFAULT_USER_AGENTS)
+    return _CACHED_USER_AGENT
 
 
 def get_default_headers(user_agent: Optional[str] = None) -> Dict[str, str]:

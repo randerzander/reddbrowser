@@ -21,6 +21,11 @@ Install dependencies with:
 pip install -r requirements.txt
 ```
 
+Set a Reddit-friendly User-Agent to avoid 403s:
+```bash
+export REDDIT_USER_AGENT="reddbrowser/0.1 by u/yourname"
+```
+
 For enhanced image viewing in terminal (optional):
 ```bash
 pip install term-image
