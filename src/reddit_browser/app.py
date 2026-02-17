@@ -10,6 +10,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 import os
 from .api import get_first_two_pages, RedditAPI
+from .hn_api import HackerNewsAPI, html_to_text as hn_html_to_text
 from .media import (
     OPENAI_AVAILABLE,
     generate_text_summary,
@@ -66,6 +67,11 @@ def linkify(text: str) -> str:
         return f"[link=\"{safe_url}\"]{safe_text}[/link]"
 
     return LINK_PATTERN.sub(_wrap, text)
+
+
+def html_to_text(content_html: str) -> str:
+    """Best-effort conversion of HTML content to plain text."""
+    return hn_html_to_text(content_html)
 
 
 def _disable_all_logging() -> None:
@@ -210,6 +216,7 @@ class CommentScreen(ModalScreen):
     def __init__(self, post_data: Dict):
         super().__init__()
         self.post_data = post_data
+        self.source = post_data.get("source", "reddit")
         self.title = html.unescape(post_data["data"]["title"])
         self.author = post_data["data"]["author"]
         self.score = post_data["data"]["score"]
@@ -217,6 +224,8 @@ class CommentScreen(ModalScreen):
         self.url = post_data["data"]["url"]
         self.permalink = post_data["data"]["permalink"]
         self.selftext = html.unescape(post_data["data"].get("selftext", ""))
+        self.hn_comments_url = post_data["data"].get("hn_comments_url")
+        self.hn_id = post_data["data"].get("hn_id")
         self.label = Label("")
         self.caption_label = Label("")  # For VLM captions
         self.caption_content_text = ""  # Source of truth for caption content
@@ -539,7 +548,8 @@ class CommentScreen(ModalScreen):
                 comment_body = html.unescape(comment["data"].get("body", "")[:200])  # Limit length
                 comment_score = comment["data"].get("score", 0)
 
-                top_comments.append(f"{i+1}. Author: u/{comment_author}, Score: {comment_score}\n   Comment: {comment_body}")
+                author_label = self._format_author(comment_author)
+                top_comments.append(f"{i+1}. Author: {author_label}, Score: {comment_score}\n   Comment: {comment_body}")
 
             if not top_comments:
                 return "No comments available."
@@ -569,11 +579,7 @@ class CommentScreen(ModalScreen):
 
     def _html_to_text(self, content_html: str) -> str:
         """Best-effort conversion of HTML content to plain text."""
-        if not content_html:
-            return ""
-        # Strip tags with a simple regex to avoid extra deps here.
-        text = re.sub(r"<[^>]+>", " ", content_html)
-        return html.unescape(" ".join(text.split()))
+        return html_to_text(content_html)
     def _set_caption_for_generation(self, loading_message: str, start_fn, unavailable_message: str) -> None:
         """Set loading UI, then kick off generation if available."""
         self._set_caption_content(loading_message)
@@ -582,22 +588,32 @@ class CommentScreen(ModalScreen):
         else:
             self._set_caption_content(unavailable_message)
 
+    def _is_hacker_news(self) -> bool:
+        return self.source == "hn"
+
+    def _format_author(self, author: str) -> str:
+        if self._is_hacker_news():
+            return author
+        return f"u/{author}"
+
     async def load_comments(self):
         """Load the post content and comments."""
         try:
+            if self._is_hacker_news():
+                await self.load_hn_comments()
+            else:
+                # Fetch comments from Reddit API
+                reddit = RedditAPI()
+                try:
+                    data = await reddit.get_comments_async(self.permalink)
+                finally:
+                    await reddit.aclose()
 
-            # Fetch comments from Reddit API
-            reddit = RedditAPI()
-            try:
-                data = await reddit.get_comments_async(self.permalink)
-            finally:
-                await reddit.aclose()
+                    # Extract comments data
+                    comments_data = data[1]["data"]["children"] if len(data) > 1 else []
 
-                # Extract comments data
-                comments_data = data[1]["data"]["children"] if len(data) > 1 else []
-
-                # Build a tree structure for nested comments
-                self.all_comments = self.build_comment_tree(comments_data)
+                    # Build a tree structure for nested comments
+                    self.all_comments = self.build_comment_tree(comments_data)
 
                 # Initially expand all comments by adding all comment IDs with replies to expanded_comments
                 self.expand_all_comments()
@@ -636,13 +652,17 @@ class CommentScreen(ModalScreen):
                 self.display_comments()
 
         except Exception as e:
+            author_label = rich_escape(self._format_author(self.author))
             error_content = (
                 f"[bold][green]{rich_escape(self.title)}[/green][/bold]\n\n"
-                f"Author: u/[green]{rich_escape(self.author)}[/green]\n"
+                f"Author: [green]{author_label}[/green]\n"
                 f"Score: [green]{self.score}[/green]\n"
                 f"Comments: [green]{self.num_comments}[/green]\n"
-                f"URL: [green]{linkify(self.url)}[/green]\n\n"
+                f"URL: [green]{linkify(self.url)}[/green]\n"
             )
+            if self.hn_comments_url:
+                error_content += f"HN Comments: [green]{linkify(self.hn_comments_url)}[/green]\n"
+            error_content += "\n"
 
             if self.selftext.strip():
                 error_content += f"Content:\n[green]{linkify(self.selftext)}[/green]\n\n"
@@ -655,6 +675,38 @@ class CommentScreen(ModalScreen):
             # Update caption panel with error or placeholder
             caption_content = f"[red]Error loading AI content: {str(e)}[/red]"
             self._set_caption_content(caption_content)
+
+    async def load_hn_comments(self) -> None:
+        """Load Hacker News comments for a story."""
+        if not self.hn_id:
+            self.all_comments = []
+            self.display_comments()
+            return
+        hn = HackerNewsAPI()
+        try:
+            self.all_comments = await hn.get_comments_tree_async(int(self.hn_id))
+        finally:
+            await hn.aclose()
+
+        self.expand_all_comments()
+
+        has_selftext = bool(self.selftext.strip())
+        if has_selftext:
+            self._set_caption_for_generation(
+                "[yellow]Generating text summary...[/yellow]",
+                self.start_text_summarization,
+                "[red]OpenAI not available for text summarization[/red]",
+            )
+        elif self.url and self.url.startswith("http"):
+            self._set_caption_for_generation(
+                "[yellow]Fetching article content...[/yellow]",
+                self.start_article_summarization,
+                "[red]OpenAI not available for article summarization[/red]",
+            )
+        else:
+            self._set_caption_content("[blue]No content to summarize[/blue]")
+
+        self.display_comments()
 
     def expand_all_comments(self):
         """Initially expand all comments that have replies."""
@@ -806,13 +858,17 @@ class CommentScreen(ModalScreen):
         is_image_post = self.is_image_post(self.url)
 
         # Format the content
+        author_label = rich_escape(self._format_author(self.author))
         content = (
             f"[bold][green]{rich_escape(self.title)}[/green][/bold]\n\n"
-            f"Author: u/[green]{rich_escape(self.author)}[/green]\n"
+            f"Author: [green]{author_label}[/green]\n"
             f"Score: [green]{self.score}[/green]\n"
             f"Comments: [green]{self.num_comments}[/green]\n"
-            f"URL: [green]{linkify(self.url)}[/green]\n\n"
+            f"URL: [green]{linkify(self.url)}[/green]\n"
         )
+        if self.hn_comments_url:
+            content += f"HN Comments: [green]{linkify(self.hn_comments_url)}[/green]\n"
+        content += "\n"
 
         # If it's an image post and term-image is available, show a message about image display
         if is_image_post and TERM_IMAGE_AVAILABLE:
@@ -854,11 +910,12 @@ class CommentScreen(ModalScreen):
 
             # Highlight the selected comment
             is_selected = (i == self.selected_comment_index)
+            author_prefix = "u/" if not self._is_hacker_news() else ""
             if is_selected:
-                content += f"{indent}{expand_indicator}[red on white]Comment by u/{safe_author} (Score: {score}):[/red on white]\n"
+                content += f"{indent}{expand_indicator}[red on white]Comment by {author_prefix}{safe_author} (Score: {score}):[/red on white]\n"
                 content += f"{indent}[red on white]{body}[/red on white]\n\n"
             else:
-                content += f"{indent}{expand_indicator}Comment by u/[yellow]{safe_author}[/yellow] (Score: {score}):\n"
+                content += f"{indent}{expand_indicator}Comment by {author_prefix}[yellow]{safe_author}[/yellow] (Score: {score}):\n"
                 content += f"{indent}[green]{body}[/green]\n\n"
 
         # Add pagination info
@@ -1457,6 +1514,7 @@ class RedditBrowserApp(App):
         self._number_buffer = ""
         self._subreddits = self._load_subreddits()
         self._subreddit_index = self._resolve_subreddit_index()
+        self._hn_subreddit = "news.ycombinator.com"
 
     def _get_subreddits_path(self) -> str:
         app_dir = os.path.dirname(__file__)
@@ -1505,6 +1563,10 @@ class RedditBrowserApp(App):
     def load_posts(self) -> None:
         """Load posts from the subreddit."""
         try:
+            if self._is_hacker_news_subreddit():
+                self.load_hn_posts()
+                return
+
             # Get first two pages of posts
             all_posts = get_first_two_pages(self.subreddit, user_agent=os.getenv("REDDIT_USER_AGENT"))
             self.posts = [post for post in all_posts if not post["data"].get("stickied", False)]
@@ -1516,6 +1578,41 @@ class RedditBrowserApp(App):
             self.update_grid()
         except Exception as e:
             self.notify(f"Error loading posts: {str(e)}", severity="error", timeout=10)
+
+    def _is_hacker_news_subreddit(self) -> bool:
+        return self.subreddit.strip().lower() == self._hn_subreddit
+
+    def _hn_story_to_post(self, story: Dict) -> Dict:
+        story_id = story.get("id")
+        hn_comments_url = f"https://news.ycombinator.com/item?id={story_id}" if story_id else ""
+        url = story.get("url") or hn_comments_url
+        return {
+            "source": "hn",
+            "data": {
+                "id": str(story_id) if story_id is not None else "",
+                "title": story.get("title", ""),
+                "author": story.get("by", "[deleted]"),
+                "score": story.get("score", 0),
+                "num_comments": story.get("descendants", 0),
+                "url": url,
+                "permalink": hn_comments_url,
+                "selftext": html_to_text(story.get("text", "")),
+                "hn_comments_url": hn_comments_url,
+                "hn_id": story_id,
+            },
+        }
+
+    def load_hn_posts(self) -> None:
+        """Load top Hacker News stories."""
+        hn = HackerNewsAPI()
+        try:
+            stories = hn.get_top_stories(limit=50)
+        finally:
+            hn.close()
+
+        self.posts = [self._hn_story_to_post(story) for story in stories]
+        self.current_page = 0
+        self.update_grid()
     
     def update_grid(self) -> None:
         """Update the grid with current posts."""
@@ -1590,7 +1687,10 @@ class RedditBrowserApp(App):
         self.subreddit = next_subreddit
         self._subreddit_index = next_index
         self.load_posts()
-        self.notify(f"Switched to r/{self.subreddit}")
+        label = self.subreddit
+        if not self._is_hacker_news_subreddit():
+            label = f"r/{label}"
+        self.notify(f"Switched to {label}")
 
     def on_key(self, event: events.Key) -> None:
         """Handle key press events, including number input for direct post selection."""

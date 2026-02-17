@@ -1,3 +1,4 @@
 localllama
+news.ycombinator.com
 linux
 ExperiencedDevs
