@@ -545,7 +545,7 @@ class CommentScreen(ModalScreen):
             # Limit to top comments
             for i, comment in enumerate(self.all_comments[:limit]):
                 comment_author = comment["data"].get("author", "[deleted]")
-                comment_body = html.unescape(comment["data"].get("body", "")[:200])  # Limit length
+                comment_body = html.unescape(comment["data"].get("body", ""))
                 comment_score = comment["data"].get("score", 0)
 
                 author_label = self._format_author(comment_author)
@@ -893,7 +893,7 @@ class CommentScreen(ModalScreen):
             comment_data = comment["data"]
             author = comment_data.get("author", "[deleted]")
             safe_author = rich_escape(author)
-            body = html.unescape(comment_data.get("body", "")[:200])  # Limit length
+            body = html.unescape(comment_data.get("body", ""))
             body = linkify(body)
             score = comment_data.get("score", 0)
             level = comment["level"]
