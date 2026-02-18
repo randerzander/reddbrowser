@@ -36,6 +36,7 @@ import shutil
 import sys
 from rich.markup import escape as rich_escape
 from rich.text import Text
+from rich.table import Table
 from rich.markup import render as render_markup
 
 try:
@@ -170,9 +171,15 @@ class PostCard(Static, can_focus=True):
         if len(self.selftext) > 100:
             self.selftext = self.selftext[:97] + "..."
 
-        # Simple content display - just the title in green
-        content = f"[green]{rich_escape(self.numbered_title)}[/green]"
-        self.update(content)
+        stats = f"[{self.score}/{self.num_comments}]"
+        row = Table.grid(expand=True)
+        row.add_column(ratio=1)
+        row.add_column(justify="right", no_wrap=True)
+        row.add_row(
+            Text(self.numbered_title, style="green"),
+            Text(stats, style="cyan"),
+        )
+        self.update(row)
 
     def on_click(self) -> None:
         """Handle click event."""
@@ -1503,6 +1510,7 @@ class RedditBrowserApp(App):
         ("j", "next_page", "Next 20 Posts"),
         ("k", "prev_page", "Previous 20 Posts"),
         ("n", "next_subreddit", "Next Subreddit"),
+        ("p", "prev_subreddit", "Previous Subreddit"),
     ]
     
     def __init__(self, subreddit: str = "LocalLlama"):
@@ -1549,6 +1557,14 @@ class RedditBrowserApp(App):
     def action_ignore(self) -> None:
         """Ignore a keybinding (used to disable defaults like Ctrl+Q)."""
         return
+
+    def _subreddit_label(self) -> str:
+        if self._is_hacker_news_subreddit():
+            return self.subreddit
+        return f"r/{self.subreddit}"
+
+    def _update_app_title(self) -> None:
+        self.title = self._subreddit_label()
     
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -1558,10 +1574,12 @@ class RedditBrowserApp(App):
     
     def on_mount(self) -> None:
         """Called when the app is mounted."""
+        self._update_app_title()
         self.load_posts()
     
     def load_posts(self) -> None:
         """Load posts from the subreddit."""
+        self._update_app_title()
         try:
             if self._is_hacker_news_subreddit():
                 self.load_hn_posts()
@@ -1686,11 +1704,27 @@ class RedditBrowserApp(App):
             return
         self.subreddit = next_subreddit
         self._subreddit_index = next_index
+        self._update_app_title()
         self.load_posts()
-        label = self.subreddit
-        if not self._is_hacker_news_subreddit():
-            label = f"r/{label}"
-        self.notify(f"Switched to {label}")
+        self.notify(f"Switched to {self._subreddit_label()}")
+
+    def action_prev_subreddit(self) -> None:
+        """Switch to the previous subreddit in subreddits.txt."""
+        if not self._subreddits:
+            self.notify("No subreddits.txt list found.", severity="error", timeout=4)
+            return
+        if self._subreddit_index < 0:
+            prev_index = len(self._subreddits) - 1
+        else:
+            prev_index = (self._subreddit_index - 1) % len(self._subreddits)
+        prev_subreddit = self._subreddits[prev_index]
+        if prev_subreddit.lower() == self.subreddit.lower():
+            return
+        self.subreddit = prev_subreddit
+        self._subreddit_index = prev_index
+        self._update_app_title()
+        self.load_posts()
+        self.notify(f"Switched to {self._subreddit_label()}")
 
     def on_key(self, event: events.Key) -> None:
         """Handle key press events, including number input for direct post selection."""
