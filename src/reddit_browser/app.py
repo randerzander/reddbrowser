@@ -171,7 +171,7 @@ class PostCard(Static, can_focus=True):
         if len(self.selftext) > 100:
             self.selftext = self.selftext[:97] + "..."
 
-        stats = f"[{self.score}/{self.num_comments}]"
+        stats = f"{self.score} / {self.num_comments}"
         row = Table.grid(expand=True)
         row.add_column(ratio=1)
         row.add_column(justify="right", no_wrap=True)
@@ -1565,15 +1565,33 @@ class RedditBrowserApp(App):
 
     def _update_app_title(self) -> None:
         self.title = self._subreddit_label()
+        try:
+            header = self.query_one("#custom_header", Static)
+            row = Table.grid(expand=True)
+            row.add_column(ratio=1, justify="center")
+            row.add_column(justify="right", no_wrap=True)
+            row.add_row(
+                Text(self._subreddit_label(), style="bold white"),
+                Text("Score / Comments", style="white"),
+            )
+            header.update(row)
+        except Exception:
+            pass
     
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
-        yield Header()
+        yield Static("", id="custom_header")
         yield VerticalScroll(Grid(id="posts_grid"))
         yield Footer()
     
     def on_mount(self) -> None:
         """Called when the app is mounted."""
+        header = self.query_one("#custom_header", Static)
+        header.styles.height = 1
+        header.styles.background = "darkblue"
+        header.styles.color = "white"
+        header.styles.padding = (0, 1)
+
         self._update_app_title()
         self.load_posts()
     
