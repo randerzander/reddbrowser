@@ -1,7 +1,6 @@
 """Media handling and VLM integration for Reddit Browser."""
 
 import os
-import base64
 import httpx
 from .http_headers import get_default_headers
 import tempfile
@@ -60,23 +59,17 @@ async def download_image(url: str) -> Optional[str]:
         async with httpx.AsyncClient(headers=get_default_headers()) as client:
             response = await client.get(url)
             response.raise_for_status()
+            return _write_temp_image(response.content, url, response.headers.get('content-type', ''))
+    except Exception:
+        return None
 
-            parsed_url = urlparse(url)
-            file_ext = os.path.splitext(parsed_url.path)[1]
-            if not file_ext:
-                content_type = response.headers.get('content-type', '')
-                if 'jpeg' in content_type or 'jpg' in content_type:
-                    file_ext = '.jpg'
-                elif 'png' in content_type:
-                    file_ext = '.png'
-                elif 'gif' in content_type:
-                    file_ext = '.gif'
-                else:
-                    file_ext = '.png'
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-                tmp_file.write(response.content)
-                return tmp_file.name
+def download_image_sync(url: str) -> Optional[str]:
+    """Download an image to a temporary file and return its path."""
+    try:
+        response = requests.get(url, headers=get_default_headers(), timeout=10)
+        response.raise_for_status()
+        return _write_temp_image(response.content, url, response.headers.get('content-type', ''))
     except Exception:
         return None
 
@@ -87,6 +80,9 @@ def open_image_in_viewer(image_path: str) -> Optional[str]:
         ['xdg-open', image_path],
         ['eog', image_path],
         ['gpicview', image_path],
+        ['gthumb', image_path],
+        ['ristretto', image_path],
+        ['shotwell', image_path],
     ]
 
     for viewer_cmd in viewers:
@@ -97,57 +93,32 @@ def open_image_in_viewer(image_path: str) -> Optional[str]:
             continue
     return None
 
-async def generate_image_description(url: str = None, image_path: str = None) -> str:
-    """Generate a description of the image using OpenRouter API."""
-    if not OPENAI_AVAILABLE:
-        return "Error: OpenAI library not installed."
+def _determine_image_extension(url: str, content_type: str) -> str:
+    parsed_url = urlparse(url)
+    file_ext = os.path.splitext(parsed_url.path)[1].lower()
+    if file_ext:
+        return file_ext
+    content_type = (content_type or "").lower()
+    if 'jpeg' in content_type or 'jpg' in content_type:
+        return '.jpg'
+    if 'png' in content_type:
+        return '.png'
+    if 'gif' in content_type:
+        return '.gif'
+    if 'webp' in content_type:
+        return '.webp'
+    if 'bmp' in content_type:
+        return '.bmp'
+    if 'svg' in content_type:
+        return '.svg'
+    return '.png'
 
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        return "Error: OPENROUTER_API_KEY not set."
 
-    try:
-        if image_path:
-            with open(image_path, "rb") as f:
-                image_data = base64.b64encode(f.read()).decode('utf-8')
-        elif url:
-            async with httpx.AsyncClient(headers=get_default_headers()) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                image_data = base64.b64encode(response.content).decode('utf-8')
-        else:
-            return "Error: No image source provided."
-
-        # Determine mime type
-        mime_type = 'image/jpeg'
-        if url:
-            if '.png' in url.lower(): mime_type = 'image/png'
-            elif '.gif' in url.lower(): mime_type = 'image/gif'
-
-        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-
-        # Use the same model as before
-        model = os.getenv("VLM_MODEL", "qwen/qwen-2.5-vl-7b-instruct:free")
-
-        def _call():
-            return client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Describe this image in detail."},
-                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}}
-                        ]
-                    }
-                ],
-                max_tokens=3000
-            )
-
-        response = await asyncio.to_thread(_call)
-        return _strip_thinking(response.choices[0].message.content)
-    except Exception as e:
-        return f"Error generating description: {str(e)}"
+def _write_temp_image(content: bytes, url: str, content_type: str) -> str:
+    file_ext = _determine_image_extension(url, content_type)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+        tmp_file.write(content)
+        return tmp_file.name
 
 def extract_article_text_sync(url: str) -> str:
     """Extract main article text from a URL using requests + pyreadability."""

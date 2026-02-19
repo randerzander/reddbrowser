@@ -18,6 +18,7 @@ from .media import (
     generate_ai_response,
     extract_article_text,
     download_image,
+    download_image_sync,
     open_image_in_viewer,
 )
 from .comments import build_comment_tree, flatten_comments
@@ -30,7 +31,6 @@ from concurrent.futures import ThreadPoolExecutor
 import base64
 import requests
 from urllib.parse import urlparse
-import tempfile
 import subprocess
 import logging
 import re
@@ -40,12 +40,6 @@ from rich.markup import escape as rich_escape
 from rich.text import Text
 from rich.table import Table
 from rich.markup import render as render_markup
-
-try:
-    import term_image.image as _term_image
-    TERM_IMAGE_AVAILABLE = True
-except ImportError:
-    TERM_IMAGE_AVAILABLE = False
 
 try:
     from openai import OpenAI
@@ -436,7 +430,7 @@ class CommentScreen(ModalScreen):
         """View image or gallery based on the current post."""
         if self.is_gallery_post():
             self.open_gallery_first_image()
-        elif self.is_image_post(self.url) and TERM_IMAGE_AVAILABLE:
+        elif self.is_image_post(self.url):
             self.view_image()
         elif self.url:
             self.open_url_in_browser()
@@ -790,13 +784,10 @@ class CommentScreen(ModalScreen):
         content += "\n"
 
         # If it's an image post and term-image is available, show a message about image display
-        if is_image_post and TERM_IMAGE_AVAILABLE:
+        if is_image_post:
             content += f"[bold]IMAGE POST:[/bold]\n"
             content += f"[green]This is an image post: {linkify(self.url)}[/green]\n"
             content += f"[yellow]Press 'v' to open image in GUI viewer (feh, eog, etc.)[/yellow]\n\n"
-        elif is_image_post and not TERM_IMAGE_AVAILABLE:
-            content += f"[green]This is an image post: {linkify(self.url)}[/green]\n"
-            content += "[yellow]Install term-image to view images in terminal[/yellow]\n\n"
         else:
             # Regular post content
             if self.selftext.strip():
@@ -941,50 +932,16 @@ class CommentScreen(ModalScreen):
     def view_image(self):
         """Display the image using feh (GUI image viewer) and generate description."""
         try:
-            # Download the image to a temporary file
-            response = requests.get(self.url, headers=get_default_headers())
-            response.raise_for_status()
+            if not self.url:
+                self.notify("No image URL available.", severity="error", timeout=6)
+                return
 
-            # Get file extension from URL
-            parsed_url = urlparse(self.url)
-            file_ext = os.path.splitext(parsed_url.path)[1]
-            if not file_ext:
-                # Guess from content type if not in URL
-                content_type = response.headers.get('content-type', '')
-                if 'jpeg' in content_type or 'jpg' in content_type:
-                    file_ext = '.jpg'
-                elif 'png' in content_type:
-                    file_ext = '.png'
-                elif 'gif' in content_type:
-                    file_ext = '.gif'
-                else:
-                    file_ext = '.png'  # Default
+            temp_path = download_image_sync(self.url)
+            if not temp_path:
+                self.notify("Failed to download image.", severity="error", timeout=6)
+                return
 
-            # Create temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-                tmp_file.write(response.content)
-                temp_path = tmp_file.name
-
-            # Try to open with feh or other image viewers
-            viewers = [
-                ['feh', temp_path],           # Lightweight image viewer
-                ['xdg-open', temp_path],      # Generic opener
-                ['eog', temp_path],           # Eye of GNOME
-                ['gpicview', temp_path],      # Lightweight GTK viewer
-                ['gthumb', temp_path],        # GNOME image viewer
-                ['ristretto', temp_path],     # XFCE image viewer
-                ['shotwell', temp_path],      # Photo manager
-            ]
-
-            viewer_used = None
-            for viewer_cmd in viewers:
-                try:
-                    # Run the image viewer in the background so the app continues
-                    subprocess.Popen(viewer_cmd)
-                    viewer_used = viewer_cmd[0]
-                    break
-                except FileNotFoundError:
-                    continue  # Viewer not installed, try next one
+            viewer_used = open_image_in_viewer(temp_path)
 
             if not viewer_used:
                 self.notify("No image viewer found. Install 'feh' or 'eog'", severity="error", timeout=10)

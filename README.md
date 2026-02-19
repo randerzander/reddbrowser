@@ -1,6 +1,6 @@
 # Reddit Browser
 
-A terminal-based TUI for browsing Reddit built with Textual. This was entirely vibe coded to scratch an itch - no support, no maintenance, just vibes.
+A terminal-based TUI for browsing Reddit & HackerNews built with Textual.
 
 ## Usage
 
@@ -8,27 +8,18 @@ A terminal-based TUI for browsing Reddit built with Textual. This was entirely v
 python app.py [subreddit]
 ```
 
-Defaults to r/LocalLlama if no subreddit specified.
+Defaults to `r/LocalLlama` if no subreddit is specified.
+Set the subreddit to `news.ycombinator.com` to browse Hacker News.
 
 ## Prerequisites
 
-Make sure you're running this in a real terminal environment (not in IDE terminals that don't properly handle input). The TUI requires a proper terminal to handle keyboard input.
+Run in a real terminal environment (not in IDE terminals that don't properly handle input). The TUI requires a proper terminal to handle keyboard input.
 
 ## Installation
 
-Install dependencies with:
+Install dependencies:
 ```bash
 pip install -r requirements.txt
-```
-
-Set a Reddit-friendly User-Agent to avoid 403s:
-```bash
-export REDDIT_USER_AGENT="reddbrowser/0.1 by u/yourname"
-```
-
-For enhanced image viewing in terminal (optional):
-```bash
-pip install term-image
 ```
 
 For AI features (optional):
@@ -52,4 +43,4 @@ export OPENROUTER_API_KEY="your-api-key-here"
 
 ## Notes
 
-This was vibe coded to satisfy a specific need. I'm not going to support it in any way, it's provided here as is for other people's inspiration and I don't intend to improve or maintain it. Code is ephemeral now and libraries are over, ask your LLM to change it in whatever way you like.
+- Uses OpenRouter for AI features via the OpenAI client.
