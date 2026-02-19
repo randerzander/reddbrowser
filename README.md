@@ -44,3 +44,13 @@ export OPENROUTER_API_KEY="your-api-key-here"
 ## Notes
 
 - Uses OpenRouter for AI features via the OpenAI client.
+
+## Screenshots
+
+### Main View
+
+![Main view](main_view.jpg)
+
+### Article View
+
+![Article view](article_view.jpg)
