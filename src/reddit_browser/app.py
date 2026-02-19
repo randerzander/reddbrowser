@@ -10,7 +10,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 import os
 from .api import get_first_two_pages, RedditAPI
-from .hn_api import HackerNewsAPI, html_to_text as hn_html_to_text
+from .hn_api import HackerNewsAPI
 from .media import (
     OPENAI_AVAILABLE,
     generate_text_summary,
@@ -20,7 +20,9 @@ from .media import (
     download_image,
     open_image_in_viewer,
 )
+from .comments import build_comment_tree, flatten_comments
 from .http_headers import get_default_headers
+from .text_utils import html_to_text
 from typing import Dict, Optional
 import html
 import asyncio
@@ -68,11 +70,6 @@ def linkify(text: str) -> str:
         return f"[link=\"{safe_url}\"]{safe_text}[/link]"
 
     return LINK_PATTERN.sub(_wrap, text)
-
-
-def html_to_text(content_html: str) -> str:
-    """Best-effort conversion of HTML content to plain text."""
-    return hn_html_to_text(content_html)
 
 
 def _disable_all_logging() -> None:
@@ -234,7 +231,6 @@ class CommentScreen(ModalScreen):
         self.hn_comments_url = post_data["data"].get("hn_comments_url")
         self.hn_id = post_data["data"].get("hn_id")
         self.label = Label("")
-        self.caption_label = Label("")  # For VLM captions
         self.caption_content_text = ""  # Source of truth for caption content
         self.all_comments = []  # Store all comments
         self.expanded_comments = set()  # Track expanded comments
@@ -387,18 +383,6 @@ class CommentScreen(ModalScreen):
 
         # Load the post and comments without blocking the UI thread
         self.call_later(lambda: asyncio.create_task(self.load_comments()))
-
-    def ensure_input_focus(self):
-        """Ensure the prompt input gets focus after a delay."""
-        try:
-            prompt_input = self.query_one("#ai_prompt_input", Input)
-            if prompt_input:
-                # Ensure the input widget is properly configured
-                prompt_input.can_focus = True
-        except Exception as e:
-            self.logger.error(f"Error focusing input: {e}")
-
-
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle when any button is pressed."""
@@ -568,7 +552,6 @@ class CommentScreen(ModalScreen):
     def _set_caption_content(self, content: str) -> None:
         """Update caption content in the UI and internal label."""
         self.caption_content_text = content or ""
-        self._update_label_safe(self.caption_label, content)
         caption_scroll = self.query_one("#caption_content", Label)
         self._update_label_safe(caption_scroll, content)
 
@@ -620,7 +603,7 @@ class CommentScreen(ModalScreen):
                     comments_data = data[1]["data"]["children"] if len(data) > 1 else []
 
                     # Build a tree structure for nested comments
-                    self.all_comments = self.build_comment_tree(comments_data)
+                self.all_comments = build_comment_tree(comments_data)
 
                 # Initially expand all comments by adding all comment IDs with replies to expanded_comments
                 self.expand_all_comments()
@@ -725,61 +708,9 @@ class CommentScreen(ModalScreen):
 
         traverse_comments(self.all_comments)
 
-    def build_comment_tree(self, comments_data):
-        """Build a tree structure from flat comments data."""
-        def process_replies(replies_list):
-            """Recursively process replies to build the tree."""
-            result = []
-            if not replies_list or replies_list == []:
-                return result
-
-            for item in replies_list:
-                if item["kind"] == "t1":  # It's a comment
-                    comment_data = item["data"]
-                    comment_obj = {
-                        "data": comment_data,
-                        "replies": [],
-                        "level": 0  # Will be set correctly during flattening
-                    }
-
-                    # Process nested replies if they exist
-                    if "replies" in comment_data and comment_data["replies"]:
-                        if isinstance(comment_data["replies"], dict) and "data" in comment_data["replies"]:
-                            nested_replies = comment_data["replies"]["data"].get("children", [])
-                            comment_obj["replies"] = process_replies(nested_replies)
-
-                    result.append(comment_obj)
-
-            # Sort by score descending
-            result.sort(key=lambda x: x["data"].get("score", 0), reverse=True)
-            return result
-
-        # Process the top-level comments
-        root_comments = []
-        for item in comments_data:
-            if item["kind"] == "t1":  # It's a comment
-                comment_data = item["data"]
-                comment_obj = {
-                    "data": comment_data,
-                    "replies": [],
-                    "level": 0
-                }
-
-                # Process nested replies if they exist
-                if "replies" in comment_data and comment_data["replies"]:
-                    if isinstance(comment_data["replies"], dict) and "data" in comment_data["replies"]:
-                        nested_replies = comment_data["replies"]["data"].get("children", [])
-                        comment_obj["replies"] = process_replies(nested_replies)
-
-                root_comments.append(comment_obj)
-
-        # Sort root comments by score descending
-        root_comments.sort(key=lambda x: x["data"].get("score", 0), reverse=True)
-        return root_comments
-
     def select_next_comment(self):
         """Select the next comment."""
-        flattened_comments = self.flatten_comments(self.all_comments)
+        flattened_comments = flatten_comments(self.all_comments, self.expanded_comments)
         if flattened_comments and self.selected_comment_index < len(flattened_comments) - 1:
             self.selected_comment_index += 1
             self.display_comments()
@@ -792,7 +723,7 @@ class CommentScreen(ModalScreen):
 
     def expand_selected_comment(self):
         """Expand the currently selected comment."""
-        flattened_comments = self.flatten_comments(self.all_comments)
+        flattened_comments = flatten_comments(self.all_comments, self.expanded_comments)
         if 0 <= self.selected_comment_index < len(flattened_comments):
             comment = flattened_comments[self.selected_comment_index]
             if len(comment.get("replies", [])) > 0:
@@ -807,7 +738,7 @@ class CommentScreen(ModalScreen):
 
     def collapse_selected_comment(self):
         """Collapse the currently selected comment."""
-        flattened_comments = self.flatten_comments(self.all_comments)
+        flattened_comments = flatten_comments(self.all_comments, self.expanded_comments)
         if 0 <= self.selected_comment_index < len(flattened_comments):
             comment = flattened_comments[self.selected_comment_index]
             # Check if the comment has replies that can be collapsed AND is currently expanded
@@ -821,28 +752,9 @@ class CommentScreen(ModalScreen):
                 else:
                     self.notify("Comment is already collapsed")
 
-    def toggle_current_comment_expansion(self):
-        """Toggle expansion of the currently viewed comment."""
-        # For now, we'll toggle the first comment that has replies
-        # In a more advanced implementation, we'd track which comment is "focused"
-        flattened_comments = self.flatten_comments(self.all_comments)
-
-        # For simplicity, we'll just toggle the first comment with replies
-        for comment in flattened_comments:
-            if len(comment.get("replies", [])) > 0:
-                comment_id = comment["data"]["id"]
-                if comment_id in self.expanded_comments:
-                    self.expanded_comments.remove(comment_id)
-                else:
-                    self.expanded_comments.add(comment_id)
-                break
-
-        # Redraw the comments
-        self.display_comments()
-
     def next_comment_page(self):
         """Show next page of comments."""
-        flattened_comments = self.flatten_comments(self.all_comments)
+        flattened_comments = flatten_comments(self.all_comments, self.expanded_comments)
         if flattened_comments and (self.current_comment_page + 1) * self.comments_per_page < len(flattened_comments):
             self.current_comment_page += 1
             self.display_comments()
@@ -856,7 +768,7 @@ class CommentScreen(ModalScreen):
     def display_comments(self):
         """Display the current page of comments with nesting."""
         # Flatten the comment tree for display
-        flattened_comments = self.flatten_comments(self.all_comments)
+        flattened_comments = flatten_comments(self.all_comments, self.expanded_comments)
 
         start_idx = self.current_comment_page * self.comments_per_page
         end_idx = min(start_idx + self.comments_per_page, len(flattened_comments))
@@ -934,36 +846,8 @@ class CommentScreen(ModalScreen):
 
     def is_image_post(self, url: str) -> bool:
         """Check if the post URL points to an image."""
-        if not url:
-            return False
-
-        # Common image extensions
-        image_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']
-
-        # Check if URL ends with an image extension or comes from image hosting services
-        url_lower = url.lower()
-
-        # Check for common image hosting domains
-        image_domains = [
-            'i.redd.it', 'i.imgur.com', 'imgur.com', 'flickr.com',
-            'instagram.com', 'twitter.com', 'facebook.com',
-            'cdn.discordapp.com', 'media.discordapp.net'
-        ]
-
-        # Check if it's from a known image domain
-        for domain in image_domains:
-            if domain in url_lower:
-                # Special handling for imgur - check if it's not an album/gallery
-                if 'imgur.com' in domain and any(x in url_lower for x in ['/a/', '/gallery/', 'album']):
-                    return False  # Imgur albums/galleries are not single images
-                return True
-
-        # Check if URL ends with an image extension
-        for ext in image_extensions:
-            if url_lower.endswith(ext):
-                return True
-
-        return False
+        from .media import is_image_url
+        return is_image_url(url)
 
     def is_gallery_post(self) -> bool:
         """Check if the post is a Reddit gallery."""
@@ -1475,30 +1359,6 @@ class CommentScreen(ModalScreen):
         except Exception as e:
             self._handle_image_description_error(e)
 
-    async def generate_image_description_for_post(self):
-        """Generate a description of the image using OpenRouter API for the current post."""
-        # Run the description generation in a separate thread to prevent blocking
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as executor:
-            await loop.run_in_executor(executor, self.generate_image_description_sync)
-
-    def flatten_comments(self, comments, level=0):
-        """Flatten the comment tree for display."""
-        result = []
-        for comment in comments:
-            # Add the current comment
-            comment_copy = dict(comment)
-            comment_copy["level"] = level
-            result.append(comment_copy)
-
-            # If the comment is expanded, add its replies
-            comment_id = comment["data"]["id"]
-            if comment_id in self.expanded_comments:
-                result.extend(self.flatten_comments(comment["replies"], level + 1))
-
-        return result
-
-
 class RedditBrowserApp(App):
     """A Textual app for browsing Reddit."""
     
@@ -1792,24 +1652,6 @@ class RedditBrowserApp(App):
             post_data = self.posts[post_index]
             # Push the comment screen directly
             self.push_screen(CommentScreen(post_data))
-
-    def focus_post(self, pos_in_page: int) -> None:
-        """Focus the post at the given position within the current page."""
-        # Get the grid containing the posts
-        grid = self.query_one("#posts_grid", Grid)
-
-        # Get all the PostCard widgets
-        post_cards = grid.children
-
-        # Make sure we have a valid index
-        if 0 <= pos_in_page < len(post_cards):
-            # Focus the correct post card
-            post_card = post_cards[pos_in_page]
-            post_card.focus()
-            # Scroll to make sure it's visible
-            grid.scroll_to_widget(post_card)
-
-
 
 def main():
     """Main entry point."""

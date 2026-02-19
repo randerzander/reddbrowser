@@ -2,9 +2,10 @@
 
 import httpx
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 import html
 from urllib.parse import urlparse, urlunparse
+from .comments import build_comment_tree as _build_comment_tree, flatten_comments as _flatten_comments
 from .http_headers import get_default_headers
 
 
@@ -128,64 +129,11 @@ class RedditAPI:
 
     def build_comment_tree(self, comments_data: List[Dict]) -> List[Dict]:
         """Build a tree structure from flat comments data."""
-        def process_replies(replies_list):
-            """Recursively process replies to build the tree."""
-            result = []
-            if not replies_list or replies_list == []:
-                return result
-
-            for item in replies_list:
-                if item["kind"] == "t1":  # It's a comment
-                    comment_data = item["data"]
-                    comment_obj = {
-                        "data": comment_data,
-                        "replies": [],
-                        "level": 0
-                    }
-
-                    if "replies" in comment_data and comment_data["replies"]:
-                        if isinstance(comment_data["replies"], dict) and "data" in comment_data["replies"]:
-                            nested_replies = comment_data["replies"]["data"].get("children", [])
-                            comment_obj["replies"] = process_replies(nested_replies)
-
-                    result.append(comment_obj)
-
-            result.sort(key=lambda x: x["data"].get("score", 0), reverse=True)
-            return result
-
-        root_comments = []
-        for item in comments_data:
-            if item["kind"] == "t1":
-                comment_data = item["data"]
-                comment_obj = {
-                    "data": comment_data,
-                    "replies": [],
-                    "level": 0
-                }
-
-                if "replies" in comment_data and comment_data["replies"]:
-                    if isinstance(comment_data["replies"], dict) and "data" in comment_data["replies"]:
-                        nested_replies = comment_data["replies"]["data"].get("children", [])
-                        comment_obj["replies"] = process_replies(nested_replies)
-
-                root_comments.append(comment_obj)
-
-        root_comments.sort(key=lambda x: x["data"].get("score", 0), reverse=True)
-        return root_comments
+        return _build_comment_tree(comments_data)
 
     def flatten_comments(self, comments: List[Dict], expanded_ids: set, level: int = 0) -> List[Dict]:
         """Flatten the comment tree for display, respecting expanded state."""
-        result = []
-        for comment in comments:
-            comment_copy = dict(comment)
-            comment_copy["level"] = level
-            result.append(comment_copy)
-
-            comment_id = comment["data"]["id"]
-            if comment_id in expanded_ids:
-                result.extend(self.flatten_comments(comment["replies"], expanded_ids, level + 1))
-
-        return result
+        return _flatten_comments(comments, expanded_ids, level)
 
     def close(self):
         """Close the HTTP clients."""

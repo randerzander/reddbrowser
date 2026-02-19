@@ -1,20 +1,11 @@
 """Hacker News API helpers."""
 
 import asyncio
-import html
 import logging
-import re
 from typing import Any, Dict, List, Optional
 
 import httpx
-
-
-def html_to_text(content_html: str) -> str:
-    """Best-effort conversion of HTML content to plain text."""
-    if not content_html:
-        return ""
-    text = re.sub(r"<[^>]+>", " ", content_html)
-    return html.unescape(" ".join(text.split()))
+from .text_utils import html_to_text
 
 
 class HackerNewsAPI:

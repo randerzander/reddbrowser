@@ -6,13 +6,12 @@ import httpx
 from .http_headers import get_default_headers
 import tempfile
 import subprocess
-from typing import Optional, List, Dict, Any
+from typing import Optional
 from urllib.parse import urlparse
-import re
 import asyncio
 import requests
 import re
-import html as html_lib
+from .text_utils import html_to_text
 
 try:
     from openai import OpenAI
@@ -150,18 +149,6 @@ async def generate_image_description(url: str = None, image_path: str = None) ->
     except Exception as e:
         return f"Error generating description: {str(e)}"
 
-def _html_to_text(html: str) -> str:
-    if not html:
-        return ""
-    html = re.sub(r"(?is)<(script|style).*?>.*?</\\1>", " ", html)
-    html = re.sub(r"(?i)<br\\s*/?>", "\n", html)
-    html = re.sub(r"(?i)</p>", "\n\n", html)
-    html = re.sub(r"(?s)<.*?>", " ", html)
-    html = html_lib.unescape(html)
-    html = re.sub(r"[ \\t\\r\\f\\v]+", " ", html)
-    html = re.sub(r"\\n\\n\\n+", "\n\n", html)
-    return html.strip()
-
 def extract_article_text_sync(url: str) -> str:
     """Extract main article text from a URL using requests + pyreadability."""
     if not READABILITY_AVAILABLE:
@@ -181,7 +168,7 @@ def extract_article_text_sync(url: str) -> str:
         except TypeError:
             summary_html = doc.summary()
 
-        text = _html_to_text(summary_html)
+        text = html_to_text(summary_html)
         if title and title not in text:
             text = f"{title}\n\n{text}"
 
