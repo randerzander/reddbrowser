@@ -4,7 +4,13 @@ set -euo pipefail
 # Copy Twitter/X cookies from Firefox (Snap profile) into ./cookies.json
 # in a Twikit-compatible format: {"cookie_name": "cookie_value", ...}
 
-PROFILE_ROOT="${FIREFOX_PROFILE_ROOT:-$HOME/snap/firefox/common/.mozilla/firefox}"
+if [[ -n "${FIREFOX_PROFILE_ROOT:-}" ]]; then
+  PROFILE_ROOT="$FIREFOX_PROFILE_ROOT"
+elif [[ -f "$HOME/.mozilla/firefox/profiles.ini" ]]; then
+  PROFILE_ROOT="$HOME/.mozilla/firefox"
+else
+  PROFILE_ROOT="$HOME/snap/firefox/common/.mozilla/firefox"
+fi
 
 if [[ ! -f "$PROFILE_ROOT/profiles.ini" ]]; then
   echo "Could not find Firefox profiles.ini at: $PROFILE_ROOT/profiles.ini" >&2
@@ -13,6 +19,8 @@ if [[ ! -f "$PROFILE_ROOT/profiles.ini" ]]; then
 fi
 
 PROFILE_PATH_REL="$(awk -F= '
+  /^\[Install/ { in_install=1; next }
+  in_install && /^Default=/ { print $2; exit }
   /^\[Profile[0-9]+\]$/ { in_profile=1; path=""; def="" }
   in_profile && /^Path=/ { path=$2 }
   in_profile && /^Default=/ { def=$2 }
@@ -69,4 +77,3 @@ with open(out_path, "w", encoding="utf-8") as f:
 
 print(f"Wrote {len(cookies)} cookies to {out_path}")
 PY
-

@@ -44,6 +44,7 @@ export OPENROUTER_API_KEY="your-api-key-here"
 ## Notes
 
 - Uses OpenRouter for AI features via the OpenAI client.
+- `scripts/copy_firefox_twitter_cookies.sh` auto-detects Firefox profiles in `~/.mozilla/firefox` and Snap installs; you can override with `FIREFOX_PROFILE_ROOT`.
 
 ## Screenshots
 
