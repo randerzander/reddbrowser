@@ -19,10 +19,21 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 try:
-    from readability import Document as ReadabilityDocument
-    READABILITY_AVAILABLE = True
+    # Preferred parser from pyreadability README usage
+    from pyreadability import Readability as PyReadability
 except ImportError:
-    READABILITY_AVAILABLE = False
+    PyReadability = None
+
+try:
+    # Backward-compatible fallback for environments with readability-lxml
+    from readability import Document as ReadabilityDocument
+except ImportError:
+    try:
+        from readability.readability import Document as ReadabilityDocument
+    except ImportError:
+        ReadabilityDocument = None
+
+READABILITY_AVAILABLE = (PyReadability is not None) or (ReadabilityDocument is not None)
 
 # Common image extensions
 IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']
@@ -123,7 +134,10 @@ def _write_temp_image(content: bytes, url: str, content_type: str) -> str:
 def extract_article_text_sync(url: str) -> str:
     """Extract main article text from a URL using requests + pyreadability."""
     if not READABILITY_AVAILABLE:
-        return "Error: pyreadability not installed."
+        return (
+            "Error: pyreadability not installed. "
+            "Install dependency: pip install git+https://github.com/randerzander/pyreadability.git"
+        )
     if not url or not url.startswith("http"):
         return "Error: Invalid URL."
 
@@ -131,13 +145,18 @@ def extract_article_text_sync(url: str) -> str:
         response = requests.get(url, headers=get_default_headers(), timeout=10)
         response.raise_for_status()
 
-        doc = ReadabilityDocument(response.text)
-        title = (doc.title() or "").strip()
-
-        try:
-            summary_html = doc.summary(html_partial=True)
-        except TypeError:
-            summary_html = doc.summary()
+        if PyReadability is not None:
+            reader = PyReadability(response.text, url=url)
+            article = reader.parse()
+            title = (article.get("title") or "").strip()
+            summary_html = article.get("content") or ""
+        else:
+            doc = ReadabilityDocument(response.text)
+            title = (doc.title() or "").strip()
+            try:
+                summary_html = doc.summary(html_partial=True)
+            except TypeError:
+                summary_html = doc.summary()
 
         text = html_to_text(summary_html)
         if title and title not in text:
