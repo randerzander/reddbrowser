@@ -11,6 +11,7 @@ from textual.screen import ModalScreen
 import os
 from .api import get_first_two_pages, RedditAPI
 from .hn_api import HackerNewsAPI
+from .twitter_api import TwitterAPI, tweet_to_post
 from .media import (
     OPENAI_AVAILABLE,
     generate_text_summary,
@@ -428,12 +429,64 @@ class CommentScreen(ModalScreen):
 
     def action_view_image(self) -> None:
         """View image or gallery based on the current post."""
+        if self._is_twitter():
+            twitter_images = self._get_twitter_all_image_urls()
+            if twitter_images:
+                self._open_urls_with_xdg_open(twitter_images)
+                return
         if self.is_gallery_post():
             self.open_gallery_first_image()
         elif self.is_image_post(self.url):
             self.view_image()
         elif self.url:
             self.open_url_in_browser()
+
+    def _get_twitter_all_image_urls(self) -> list[str]:
+        """Return all attached Twitter image URLs from viewed + context tweets."""
+        urls = []
+        seen = set()
+
+        def _add(url: str) -> None:
+            if not isinstance(url, str):
+                return
+            value = url.strip()
+            if not value or value in seen:
+                return
+            seen.add(value)
+            urls.append(value)
+
+        data = self.post_data.get("data", {})
+        for url in data.get("twitter_media_urls") or []:
+            _add(url)
+        for entry in data.get("twitter_context_entries") or []:
+            for url in (entry.get("twitter_media_urls") or []):
+                _add(url)
+        return urls
+
+    def _get_twitter_first_image_url(self) -> Optional[str]:
+        """Return the first attached Twitter image URL if present."""
+        media_urls = self.post_data.get("data", {}).get("twitter_media_urls") or []
+        for url in media_urls:
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+        return None
+
+    def _open_urls_with_xdg_open(self, urls: list[str]) -> None:
+        """Open one or more URLs using xdg-open."""
+        opened = 0
+        for url in urls:
+            try:
+                subprocess.Popen(["xdg-open", url])
+                opened += 1
+            except FileNotFoundError:
+                self.notify("xdg-open not found. Install xdg-utils.", severity="error", timeout=8)
+                return
+            except Exception:
+                continue
+        if opened:
+            self.notify(f"Opened {opened} image URL{'s' if opened != 1 else ''} with xdg-open")
+        else:
+            self.notify("No Twitter image URLs could be opened.", severity="error", timeout=6)
 
     def open_url_in_browser(self) -> None:
         """Open the post URL in the default browser."""
@@ -575,16 +628,86 @@ class CommentScreen(ModalScreen):
     def _is_hacker_news(self) -> bool:
         return self.source == "hn"
 
+    def _is_twitter(self) -> bool:
+        return self.source == "twitter"
+
     def _format_author(self, author: str) -> str:
         if self._is_hacker_news():
             return author
+        if self._is_twitter():
+            return f"@{author}"
         return f"u/{author}"
+
+    def _format_title_with_media_badge(self) -> str:
+        """Format the post title; for tweets with images, show [img] at right."""
+        title = " ".join((self.title or "").split())
+        if not (self._is_twitter() and self._get_twitter_first_image_url()):
+            return rich_escape(title)
+
+        badge = "[img]"
+        # Approximate available width for the content area.
+        width = max(30, int(getattr(self.size, "width", 80)) - 8)
+        usable_title = max(8, width - len(badge) - 1)
+        if len(title) > usable_title:
+            title = title[: usable_title - 3] + "..."
+        pad = max(1, width - len(title) - len(badge))
+        return f"{rich_escape(title)}{' ' * pad}{rich_escape(badge)}"
+
+    def _twitter_context_block(self) -> str:
+        """Format quoted/replied-to tweet context for tweet detail view."""
+        if not self._is_twitter():
+            return ""
+        entries = self.post_data.get("data", {}).get("twitter_context_entries") or []
+        if not entries:
+            return ""
+
+        lines = ["[bold]Tweet Context:[/bold]"]
+        for entry in entries:
+            label = rich_escape(str(entry.get("label", "Context")))
+            author = rich_escape(str(entry.get("author", "unknown")))
+            text = linkify(str(entry.get("text", "") or ""))
+            url = str(entry.get("url", "") or "")
+            lines.append(f"{label}: [yellow]@{author}[/yellow]")
+            if text:
+                lines.append(f"[green]{text}[/green]")
+            if url:
+                lines.append(f"URL: [green]{linkify(url)}[/green]")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def _summary_source_text(self) -> str:
+        """Build source text for AI summary generation."""
+        base_text = (self.selftext or "").strip()
+        if not self._is_twitter():
+            return base_text
+
+        parts = []
+        author = self.post_data.get("data", {}).get("author", self.author)
+        if base_text:
+            parts.append(f"Viewed tweet by @{author}:\n{base_text}")
+        else:
+            parts.append(f"Viewed tweet by @{author}: [No text]")
+
+        entries = self.post_data.get("data", {}).get("twitter_context_entries") or []
+        linked_entries = [e for e in entries if "linked" in str(e.get("kind", "")) or "referenced" in str(e.get("kind", ""))]
+        if not linked_entries and entries:
+            linked_entries = entries[:1]
+
+        for entry in linked_entries[:2]:
+            label = str(entry.get("label", "Linked Tweet"))
+            entry_author = str(entry.get("author", "unknown"))
+            entry_text = str(entry.get("text", "") or "[No text]")
+            parts.append(f"{label} by @{entry_author}:\n{entry_text}")
+
+        return "\n\n".join(parts).strip()
 
     async def load_comments(self):
         """Load the post content and comments."""
         try:
             if self._is_hacker_news():
                 await self.load_hn_comments()
+            elif self._is_twitter():
+                await self.load_twitter_comments()
             else:
                 # Fetch comments from Reddit API
                 reddit = RedditAPI()
@@ -638,7 +761,7 @@ class CommentScreen(ModalScreen):
         except Exception as e:
             author_label = rich_escape(self._format_author(self.author))
             error_content = (
-                f"[bold][green]{rich_escape(self.title)}[/green][/bold]\n\n"
+                f"[bold][green]{self._format_title_with_media_badge()}[/green][/bold]\n\n"
                 f"Author: [green]{author_label}[/green]\n"
                 f"Score: [green]{self.score}[/green]\n"
                 f"Comments: [green]{self.num_comments}[/green]\n"
@@ -647,6 +770,9 @@ class CommentScreen(ModalScreen):
             if self.hn_comments_url:
                 error_content += f"HN Comments: [green]{linkify(self.hn_comments_url)}[/green]\n"
             error_content += "\n"
+            context_block = self._twitter_context_block()
+            if context_block:
+                error_content += f"{context_block}\n\n"
 
             if self.selftext.strip():
                 error_content += f"Content:\n[green]{linkify(self.selftext)}[/green]\n\n"
@@ -659,6 +785,52 @@ class CommentScreen(ModalScreen):
             # Update caption panel with error or placeholder
             caption_content = f"[red]Error loading AI content: {str(e)}[/red]"
             self._set_caption_content(caption_content)
+
+    async def load_twitter_comments(self) -> None:
+        """Load replies for a tweet."""
+        tweet_id = self.post_data["data"].get("twitter_tweet_id")
+        if not tweet_id:
+            self.all_comments = []
+            self.display_comments()
+            return
+
+        api = TwitterAPI(
+            cookies_file=os.getenv("TWITTER_COOKIES_FILE", "cookies.json"),
+            locale=os.getenv("TWITTER_LOCALE", "en-US"),
+        )
+        tweet, reply_tree = await api.get_tweet_and_reply_tree(str(tweet_id))
+        self.all_comments = reply_tree
+        try:
+            self.post_data["data"]["twitter_context_entries"] = await api.get_tweet_context_entries(tweet)
+        except Exception:
+            self.post_data["data"]["twitter_context_entries"] = []
+        latest_media_urls = []
+        for media in list(getattr(tweet, "media", []) or []):
+            media_type = str(getattr(media, "type", "") or "").lower()
+            media_url = str(getattr(media, "media_url", "") or "").strip()
+            if media_type == "photo" and media_url:
+                latest_media_urls.append(media_url)
+        if latest_media_urls:
+            self.post_data["data"]["twitter_media_urls"] = latest_media_urls
+        self.expand_all_comments()
+
+        has_selftext = bool(self.selftext.strip())
+        if has_selftext:
+            self._set_caption_for_generation(
+                "[yellow]Generating text summary...[/yellow]",
+                self.start_text_summarization,
+                "[red]OpenAI not available for text summarization[/red]",
+            )
+        elif self.url and self.url.startswith("http"):
+            self._set_caption_for_generation(
+                "[yellow]Fetching article content...[/yellow]",
+                self.start_article_summarization,
+                "[red]OpenAI not available for article summarization[/red]",
+            )
+        else:
+            self._set_caption_content("[blue]No content to summarize[/blue]")
+
+        self.display_comments()
 
     async def load_hn_comments(self) -> None:
         """Load Hacker News comments for a story."""
@@ -773,7 +945,7 @@ class CommentScreen(ModalScreen):
         # Format the content
         author_label = rich_escape(self._format_author(self.author))
         content = (
-            f"[bold][green]{rich_escape(self.title)}[/green][/bold]\n\n"
+            f"[bold][green]{self._format_title_with_media_badge()}[/green][/bold]\n\n"
             f"Author: [green]{author_label}[/green]\n"
             f"Score: [green]{self.score}[/green]\n"
             f"Comments: [green]{self.num_comments}[/green]\n"
@@ -782,6 +954,9 @@ class CommentScreen(ModalScreen):
         if self.hn_comments_url:
             content += f"HN Comments: [green]{linkify(self.hn_comments_url)}[/green]\n"
         content += "\n"
+        context_block = self._twitter_context_block()
+        if context_block:
+            content += f"{context_block}\n\n"
 
         # If it's an image post and term-image is available, show a message about image display
         if is_image_post:
@@ -820,7 +995,7 @@ class CommentScreen(ModalScreen):
 
             # Highlight the selected comment
             is_selected = (i == self.selected_comment_index)
-            author_prefix = "u/" if not self._is_hacker_news() else ""
+            author_prefix = "" if (self._is_hacker_news() or self._is_twitter()) else "u/"
             if is_selected:
                 content += f"{indent}{expand_indicator}[red on white]Comment by {author_prefix}{safe_author} (Score: {score}):[/red on white]\n"
                 content += f"{indent}[red on white]{body}[/red on white]\n\n"
@@ -929,14 +1104,15 @@ class CommentScreen(ModalScreen):
 
         asyncio.create_task(_open_async())
 
-    def view_image(self):
+    def view_image(self, image_url: Optional[str] = None):
         """Display the image using feh (GUI image viewer) and generate description."""
         try:
-            if not self.url:
+            target_url = image_url or self.url
+            if not target_url:
                 self.notify("No image URL available.", severity="error", timeout=6)
                 return
 
-            temp_path = download_image_sync(self.url)
+            temp_path = download_image_sync(target_url)
             if not temp_path:
                 self.notify("Failed to download image.", severity="error", timeout=6)
                 return
@@ -1021,7 +1197,7 @@ class CommentScreen(ModalScreen):
         try:
             # Generate summary using the media module function
             self.logger.info("Calling generate_text_summary")
-            summary = await generate_text_summary(self.selftext)
+            summary = await generate_text_summary(self._summary_source_text())
             self.logger.info(f"Received summary: {summary[:100]}...")  # Log first 100 chars
 
             if summary and not summary.startswith("Error"):
@@ -1340,6 +1516,7 @@ class RedditBrowserApp(App):
         self._subreddits = self._load_subreddits()
         self._subreddit_index = self._resolve_subreddit_index()
         self._hn_subreddit = "news.ycombinator.com"
+        self._twitter_subreddit = "twitter"
 
     def _get_subreddits_path(self) -> str:
         app_dir = os.path.dirname(__file__)
@@ -1376,7 +1553,7 @@ class RedditBrowserApp(App):
         return
 
     def _subreddit_label(self) -> str:
-        if self._is_hacker_news_subreddit():
+        if self._is_hacker_news_subreddit() or self._is_twitter_subreddit():
             return self.subreddit
         return f"r/{self.subreddit}"
 
@@ -1419,6 +1596,9 @@ class RedditBrowserApp(App):
             if self._is_hacker_news_subreddit():
                 self.load_hn_posts()
                 return
+            if self._is_twitter_subreddit():
+                self.load_twitter_posts()
+                return
 
             # Get first two pages of posts
             all_posts = get_first_two_pages(self.subreddit, user_agent=os.getenv("REDDIT_USER_AGENT"))
@@ -1434,6 +1614,9 @@ class RedditBrowserApp(App):
 
     def _is_hacker_news_subreddit(self) -> bool:
         return self.subreddit.strip().lower() == self._hn_subreddit
+
+    def _is_twitter_subreddit(self) -> bool:
+        return self.subreddit.strip().lower() == self._twitter_subreddit
 
     def _hn_story_to_post(self, story: Dict) -> Dict:
         story_id = story.get("id")
@@ -1464,6 +1647,17 @@ class RedditBrowserApp(App):
             hn.close()
 
         self.posts = [self._hn_story_to_post(story) for story in stories]
+        self.current_page = 0
+        self.update_grid()
+
+    def load_twitter_posts(self) -> None:
+        """Load latest tweets from the authenticated home timeline."""
+        api = TwitterAPI(
+            cookies_file=os.getenv("TWITTER_COOKIES_FILE", "cookies.json"),
+            locale=os.getenv("TWITTER_LOCALE", "en-US"),
+        )
+        tweets = api.get_latest_timeline_sync(limit=50)
+        self.posts = [tweet_to_post(tweet) for tweet in tweets]
         self.current_page = 0
         self.update_grid()
     

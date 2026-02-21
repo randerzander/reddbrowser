@@ -1,4 +1,6 @@
 localllama
 news.ycombinator.com
+vibecoding
 linux
 ExperiencedDevs
+twitter
