@@ -1205,31 +1205,7 @@ class CommentScreen(ModalScreen):
                 # Update the caption column with the summary (replace initial content)
                 self._schedule_caption_update(summary, "text", "Text summary generated!", append=False)
                 self.logger.info("Caption update scheduled")
-
-                # Summarize the top comments and append to the AI panel
-                top_comments_text = self.get_top_comments(limit=10)
-                if top_comments_text.startswith("No comments"):
-                    self._schedule_caption_update(
-                        "No comments available to summarize.",
-                        "comments",
-                        "Top comments summary skipped.",
-                        append=True,
-                    )
-                else:
-                    self.logger.info("Calling generate_comments_summary")
-                    comments_summary = await generate_comments_summary(top_comments_text)
-                    if comments_summary and not comments_summary.startswith("Error"):
-                        self._schedule_caption_update(
-                            comments_summary,
-                            "comments",
-                            "Top comments summary generated!",
-                            append=True,
-                        )
-                    else:
-                        self.logger.info(f"Error in comments summary: {comments_summary}")
-                        current_content = self._get_caption_content()
-                        error_content = f"{current_content}\n\n[red]{comments_summary}[/red]"
-                        self._set_caption_content(error_content)
+                await self._append_top_comments_summary()
             else:
                 self.logger.info(f"Error in summary: {summary}")
                 # Update with error message
@@ -1261,6 +1237,7 @@ class CommentScreen(ModalScreen):
 
             if summary and not summary.startswith("Error"):
                 self._schedule_caption_update(summary, "text", "Article summary generated!", append=False)
+                await self._append_top_comments_summary()
             else:
                 error_content = f"[red]{summary}[/red]"
                 caption_scroll = self.query_one("#caption_content", Label)
@@ -1270,6 +1247,34 @@ class CommentScreen(ModalScreen):
             error_content = f"[red]Error in article summarization: {str(e)}[/red]"
             caption_scroll = self.query_one("#caption_content", Label)
             caption_scroll.update(error_content)
+
+    async def _append_top_comments_summary(self) -> None:
+        """Summarize top comments and append the result to the AI panel."""
+        top_comments_text = self.get_top_comments(limit=10)
+        if top_comments_text.startswith("No comments"):
+            self._schedule_caption_update(
+                "No comments available to summarize.",
+                "comments",
+                "Top comments summary skipped.",
+                append=True,
+            )
+            return
+
+        self.logger.info("Calling generate_comments_summary")
+        comments_summary = await generate_comments_summary(top_comments_text)
+        if comments_summary and not comments_summary.startswith("Error"):
+            self._schedule_caption_update(
+                comments_summary,
+                "comments",
+                "Top comments summary generated!",
+                append=True,
+            )
+            return
+
+        self.logger.info(f"Error in comments summary: {comments_summary}")
+        current_content = self._get_caption_content()
+        error_content = f"{current_content}\n\n[red]{comments_summary}[/red]"
+        self._set_caption_content(error_content)
 
     async def run_vlm_in_thread(self):
         """Run the VLM call in a separate thread."""

@@ -235,7 +235,7 @@ async def generate_comments_summary(comments_text: str) -> str:
             return client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=300
+                max_tokens=2000
             )
 
         response = await asyncio.to_thread(_call)
