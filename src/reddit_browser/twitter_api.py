@@ -100,6 +100,7 @@ def tweet_to_post(tweet: Any) -> Dict[str, Any]:
     title = _truncate_one_line(f"@{author}: {title_text}")
     url = _tweet_url(tweet)
     image_urls = _tweet_image_urls(tweet)
+    created_at = getattr(tweet, "created_at", None) or getattr(tweet, "time", None)
     return {
         "source": "twitter",
         "data": {
@@ -113,6 +114,7 @@ def tweet_to_post(tweet: Any) -> Dict[str, Any]:
             "selftext": text,
             "twitter_tweet_id": tweet_id,
             "twitter_media_urls": image_urls,
+            "created_at": created_at,
         },
     }
 

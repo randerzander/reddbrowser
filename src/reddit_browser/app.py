@@ -9,6 +9,7 @@ from textual import events
 from textual.message import Message
 from textual.screen import ModalScreen
 import os
+from datetime import datetime, timezone
 from .api import get_first_two_pages, RedditAPI
 from .hn_api import HackerNewsAPI
 from .twitter_api import TwitterAPI, tweet_to_post
@@ -701,6 +702,62 @@ class CommentScreen(ModalScreen):
 
         return "\n\n".join(parts).strip()
 
+    def _parse_timestamp_str(self, value: str) -> Optional[datetime]:
+        """Parse a timestamp string into a datetime in UTC."""
+        if not value:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+
+        formats = (
+            "%a %b %d %H:%M:%S %z %Y",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S%z",
+        )
+        for fmt in formats:
+            try:
+                return datetime.strptime(value, fmt).astimezone(timezone.utc)
+            except ValueError:
+                continue
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _format_posted_at(self) -> str:
+        """Return a human-friendly posted-at timestamp if available."""
+        data = self.post_data.get("data", {})
+        created_utc = data.get("created_utc")
+        if isinstance(created_utc, (int, float)):
+            dt = datetime.fromtimestamp(created_utc, tz=timezone.utc)
+            return self._format_posted_at_with_delta(dt)
+
+        created_at = data.get("created_at")
+        if isinstance(created_at, datetime):
+            dt = created_at
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return self._format_posted_at_with_delta(dt.astimezone(timezone.utc))
+        if isinstance(created_at, str):
+            parsed = self._parse_timestamp_str(created_at)
+            if parsed:
+                return self._format_posted_at_with_delta(parsed)
+            return created_at
+
+        return ""
+
+    def _format_posted_at_with_delta(self, dt: datetime) -> str:
+        now = datetime.now(timezone.utc)
+        delta_seconds = (now - dt).total_seconds()
+        hours_ago = max(0, int(delta_seconds // 3600))
+        return f"{dt.strftime('%Y-%m-%d %H:%M UTC')} ({hours_ago} hrs ago)"
+
     async def load_comments(self):
         """Load the post content and comments."""
         try:
@@ -767,6 +824,9 @@ class CommentScreen(ModalScreen):
                 f"Comments: [green]{self.num_comments}[/green]\n"
                 f"URL: [green]{linkify(self.url)}[/green]\n"
             )
+            posted_at = self._format_posted_at()
+            if posted_at:
+                error_content += f"Posted: [green]{posted_at}[/green]\n"
             if self.hn_comments_url:
                 error_content += f"HN Comments: [green]{linkify(self.hn_comments_url)}[/green]\n"
             error_content += "\n"
@@ -951,6 +1011,9 @@ class CommentScreen(ModalScreen):
             f"Comments: [green]{self.num_comments}[/green]\n"
             f"URL: [green]{linkify(self.url)}[/green]\n"
         )
+        posted_at = self._format_posted_at()
+        if posted_at:
+            content += f"Posted: [green]{posted_at}[/green]\n"
         if self.hn_comments_url:
             content += f"HN Comments: [green]{linkify(self.hn_comments_url)}[/green]\n"
         content += "\n"
@@ -1640,6 +1703,7 @@ class RedditBrowserApp(App):
                 "selftext": html_to_text(story.get("text", "")),
                 "hn_comments_url": hn_comments_url,
                 "hn_id": story_id,
+                "created_utc": story.get("time"),
             },
         }
 
