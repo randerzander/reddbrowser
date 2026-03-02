@@ -79,7 +79,7 @@ def find_a100_image_in_subreddit(subreddit="LocalLlama"):
         print(f"Error searching for post: {e}")
         return None, None
 
-def test_a100_image_captioning():
+def run_a100_image_captioning():
     """Test captioning specifically for the A100 image."""
     
     # Get the API key from environment variable
@@ -196,7 +196,7 @@ def main():
     print("Testing image captioning for 'Latest upgrade...A100 40 GB' post")
     print()
     
-    success = test_a100_image_captioning()
+    success = run_a100_image_captioning()
     
     if success:
         print("\n✓ A100 image captioning test completed!")

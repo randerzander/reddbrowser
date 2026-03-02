@@ -773,10 +773,10 @@ class CommentScreen(ModalScreen):
                 finally:
                     await reddit.aclose()
 
-                    # Extract comments data
-                    comments_data = data[1]["data"]["children"] if len(data) > 1 else []
+                # Extract comments data
+                comments_data = data[1]["data"]["children"] if len(data) > 1 else []
 
-                    # Build a tree structure for nested comments
+                # Build a tree structure for nested comments
                 self.all_comments = build_comment_tree(comments_data)
 
                 # Initially expand all comments by adding all comment IDs with replies to expanded_comments
@@ -1498,7 +1498,7 @@ class CommentScreen(ModalScreen):
         self.logger.info(f"_schedule_caption_update called with content_type={content_type}, append={append}")
 
         # Use Textual's worker system to schedule updates on the main thread
-        async def update_ui():
+        def update_ui():
             self.logger.info("Executing update_ui function")
             self._update_caption_column(description, content_type, append)
             self.logger.info("Caption column updated, sending notification")
@@ -1511,7 +1511,7 @@ class CommentScreen(ModalScreen):
 
     def _handle_image_description_error(self, error):
         """Helper method to handle image description errors."""
-        async def show_error():
+        def show_error():
             self.notify(f"Error generating image description: {str(error)}", severity="error", timeout=10)
 
         # Schedule the error notification on the main thread
@@ -1760,9 +1760,8 @@ class RedditBrowserApp(App):
 
     def on_post_selected(self, message: PostSelected) -> None:
         """Handle when a post is selected."""
-        # Convert the page-relative index to global index
-        page_relative_index = message.post_index
-        global_index = self.current_page * self.posts_per_page + page_relative_index
+        # PostCard already sends a global index.
+        global_index = message.post_index
 
         if 0 <= global_index < len(self.posts):
             post_data = self.posts[global_index]

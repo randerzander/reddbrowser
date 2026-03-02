@@ -7,7 +7,7 @@ import requests
 import tempfile
 from openai import OpenAI
 
-def test_vlm_captioning():
+def run_vlm_captioning():
     """Test the VLM captioning functionality with a sample image."""
     
     # Get the API key from environment variable
@@ -104,7 +104,7 @@ def main():
     print("OpenRouter VLM Captioning Test")
     print("==============================")
     
-    success = test_vlm_captioning()
+    success = run_vlm_captioning()
     
     if success:
         print("\n✓ VLM captioning test PASSED!")

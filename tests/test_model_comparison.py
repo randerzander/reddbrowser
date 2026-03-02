@@ -8,7 +8,7 @@ import tempfile
 import time
 from openai import OpenAI
 
-def test_model_performance(model_name, image_data, image_format="png"):
+def run_model_performance(model_name, image_data, image_format="png"):
     """Test a specific model and measure its performance."""
     
     # Get the API key from environment variable
@@ -101,7 +101,7 @@ def compare_models():
         
         for model_id, model_name in models:
             print(f"Testing {model_name} ({model_id})...")
-            description, duration = test_model_performance(model_id, image_data, "png")
+            description, duration = run_model_performance(model_id, image_data, "png")
             
             if description:
                 results[model_name] = {
