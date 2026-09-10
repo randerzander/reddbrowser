@@ -1,9 +1,9 @@
 """Reddit Browser - A textual TUI for browsing Reddit"""
 
-import httpx
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
-import html
+import requests
 from urllib.parse import urlparse, urlunparse
 from .comments import build_comment_tree as _build_comment_tree, flatten_comments as _flatten_comments
 from .http_headers import get_default_headers
@@ -22,14 +22,8 @@ class RedditAPI:
         self.fallback_base_url = fallback_base_url
         self.headers = get_default_headers(user_agent)
         self.logger = logging.getLogger(__name__)
-        self.client = httpx.Client(
-            headers=self.headers,
-            timeout=10.0
-        )
-        self.async_client = httpx.AsyncClient(
-            headers=self.headers,
-            timeout=10.0
-        )
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
 
     def _build_url(self, path_or_url: str) -> str:
         if path_or_url.startswith("http"):
@@ -59,14 +53,14 @@ class RedditAPI:
         return None
 
     def _request_json(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        response = self.client.get(url, params=params)
+        response = self.session.get(url, params=params, timeout=10)
         try:
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
+        except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 403:
                 fallback_url = self._build_fallback_url(url)
                 if fallback_url:
-                    response = self.client.get(fallback_url, params=params)
+                    response = self.session.get(fallback_url, params=params, timeout=10)
                     response.raise_for_status()
                 else:
                     raise
@@ -75,20 +69,7 @@ class RedditAPI:
         return response.json()
 
     async def _request_json_async(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        response = await self.async_client.get(url, params=params)
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 403:
-                fallback_url = self._build_fallback_url(url)
-                if fallback_url:
-                    response = await self.async_client.get(fallback_url, params=params)
-                    response.raise_for_status()
-                else:
-                    raise
-            else:
-                raise
-        return response.json()
+        return await asyncio.to_thread(self._request_json, url, params)
     
     def get_subreddit_posts(self, subreddit: str, limit: int = 25, after: Optional[str] = None) -> Dict:
         """Fetch posts from a subreddit (sync)."""
@@ -137,13 +118,11 @@ class RedditAPI:
 
     def close(self):
         """Close the HTTP clients."""
-        self.client.close()
-        # Note: async_client.aclose() should be awaited, but we can't easily do it here
-        # In a real app, we'd use a context manager or proper lifecycle management
+        self.session.close()
 
     async def aclose(self):
         """Close the async HTTP client."""
-        await self.async_client.aclose()
+        self.session.close()
 
 
 def get_first_two_pages(subreddit: str, user_agent: Optional[str] = None) -> List[Dict]:
