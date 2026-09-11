@@ -148,12 +148,13 @@ def _generate_subjects_summary(titles_text: str, text_ai: TextAIClient) -> str:
         LOGGER.info("Calling LLM to extract subjects for title chunk %d/%d", index, len(title_chunks))
         prompt = (
             "Read these post titles and extract the common subject matter/themes.\n"
-            "Write only concise bullet points.\n\n"
+            "Write each subject as its own section with a short heading followed by 3-4 sentences. "
+            "Separate subjects with one blank line. Do not use bullet lists.\n\n"
             "Titles:\n"
             + "\n".join(title_chunk)
-            + "\n\nCommon themes:\n-"
+            + "\n\nCommon themes:\n"
         )
-        response = asyncio.run(text_ai.generate_response(prompt, max_tokens=1000))
+        response = asyncio.run(text_ai.generate_response(prompt, max_tokens=2500))
         summary = (response or "").strip()
         LOGGER.info(
             "Subject chunk %d/%d summary time: %s (%d titles, %d chars output)",
@@ -164,8 +165,6 @@ def _generate_subjects_summary(titles_text: str, text_ai: TextAIClient) -> str:
             len(summary),
         )
         if summary:
-            if not summary.startswith("-"):
-                summary = "- " + summary
             chunk_summaries.append(summary)
 
     if not chunk_summaries:
@@ -178,20 +177,19 @@ def _generate_subjects_summary(titles_text: str, text_ai: TextAIClient) -> str:
     LOGGER.info("Calling LLM to merge %d title subject chunk(s)", len(chunk_summaries))
     merge_prompt = (
         "Merge these topic lists into one deduplicated set of common themes across all sources.\n"
-        "Write 5-15 concise bullet points. Write only the bullets.\n\n"
+        "Write 5-15 subject sections. Each section must have a short heading followed by 3-4 sentences. "
+        "Separate sections with one blank line. Do not use bullet lists.\n\n"
         "Topic lists:\n"
         + "\n\n".join(chunk_summaries)
-        + "\n\nMerged common themes:\n-"
+        + "\n\nMerged common themes:\n"
     )
-    merged = asyncio.run(text_ai.generate_response(merge_prompt, max_tokens=1200))
+    merged = asyncio.run(text_ai.generate_response(merge_prompt, max_tokens=3500))
     merged = (merged or "").strip()
     LOGGER.info(
         "Subject merge summary time: %s (%d chars output)",
         _format_duration(time.perf_counter() - merge_start),
         len(merged),
     )
-    if merged and not merged.startswith("-"):
-        merged = "- " + merged
     return merged
 
 

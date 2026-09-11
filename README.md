@@ -44,6 +44,7 @@ export OPENROUTER_API_KEY="your-api-key-here"
 ## Notes
 
 - Uses OpenRouter for AI features via the OpenAI client.
+- Standalone summary/export scripts use the OpenAI client against a local OpenAI-compatible server first, defaulting to `http://192.168.1.90:8080/v1`. Override with `LOCAL_LLAMA_CPP_BASE_URL`; set `USE_LOCAL_LLAMA_CPP=0` to skip local probing and fall back to OpenRouter when `OPENROUTER_API_KEY` is set. Reddit fetches reuse Firefox cookies by default, matching the TUI; set `USE_FIREFOX_REDDIT_SESSION=0` for anonymous requests.
 - `scripts/copy_firefox_twitter_cookies.sh` auto-detects Firefox profiles in `~/.mozilla/firefox` and Snap installs; you can override with `FIREFOX_PROFILE_ROOT`.
 
 ## Screenshots

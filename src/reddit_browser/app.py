@@ -767,7 +767,7 @@ class CommentScreen(ModalScreen):
                 await self.load_twitter_comments()
             else:
                 # Fetch comments from Reddit API
-                reddit = RedditAPI()
+                reddit = RedditAPI(use_firefox_session=True)
                 try:
                     data = await reddit.get_comments_async(self.permalink)
                 finally:
@@ -1111,7 +1111,7 @@ class CommentScreen(ModalScreen):
                         api_url = f"https://www.reddit.com/comments/{post_id}.json"
 
                 if api_url:
-                    reddit = RedditAPI()
+                    reddit = RedditAPI(use_firefox_session=True)
                     try:
                         listing = reddit.get_json(api_url)
                     finally:
@@ -1669,7 +1669,11 @@ class RedditBrowserApp(App):
                 return
 
             # Get first two pages of posts
-            all_posts = get_first_two_pages(self.subreddit, user_agent=os.getenv("REDDIT_USER_AGENT"))
+            all_posts = get_first_two_pages(
+                self.subreddit,
+                user_agent=os.getenv("REDDIT_USER_AGENT"),
+                use_firefox_session=True,
+            )
             self.posts = [post for post in all_posts if not post["data"].get("stickied", False)]
             
             # Reset to first page when loading new posts

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from urllib.parse import urlparse, urlunparse
 from .comments import build_comment_tree as _build_comment_tree, flatten_comments as _flatten_comments
+from .firefox_session import apply_firefox_reddit_session
 from .http_headers import get_default_headers
 
 
@@ -17,6 +18,8 @@ class RedditAPI:
         user_agent: Optional[str] = None,
         base_url: str = "https://www.reddit.com",
         fallback_base_url: str = "https://old.reddit.com",
+        use_firefox_session: bool = False,
+        firefox_profile: Optional[str] = None,
     ):
         self.base_url = base_url
         self.fallback_base_url = fallback_base_url
@@ -24,6 +27,16 @@ class RedditAPI:
         self.logger = logging.getLogger(__name__)
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        self.firefox_cookie_names: List[str] = []
+        if use_firefox_session:
+            try:
+                self.firefox_cookie_names = apply_firefox_reddit_session(
+                    self.session,
+                    firefox_profile,
+                )
+                self.headers = dict(self.session.headers)
+            except Exception as exc:
+                self.logger.warning("Failed to apply Firefox Reddit session: %s", exc)
 
     def _build_url(self, path_or_url: str) -> str:
         if path_or_url.startswith("http"):
@@ -125,9 +138,18 @@ class RedditAPI:
         self.session.close()
 
 
-def get_first_two_pages(subreddit: str, user_agent: Optional[str] = None) -> List[Dict]:
+def get_first_two_pages(
+    subreddit: str,
+    user_agent: Optional[str] = None,
+    use_firefox_session: bool = False,
+    firefox_profile: Optional[str] = None,
+) -> List[Dict]:
     """Get the first two pages of posts from a subreddit (sync)."""
-    reddit = RedditAPI(user_agent=user_agent)
+    reddit = RedditAPI(
+        user_agent=user_agent,
+        use_firefox_session=use_firefox_session,
+        firefox_profile=firefox_profile,
+    )
     try:
         first_page = reddit.get_subreddit_posts(subreddit, limit=25)
         posts = first_page["data"]["children"]
