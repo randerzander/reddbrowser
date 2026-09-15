@@ -19,7 +19,7 @@ from typing import List
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from reddit_browser.api import get_first_two_pages, RedditAPI  # noqa: E402
+from reddit_browser.api import NonJSONResponseError, get_first_two_pages, RedditAPI  # noqa: E402
 from reddit_browser.hn_api import HackerNewsAPI  # noqa: E402
 from reddit_browser.media import extract_article_text, is_image_url  # noqa: E402
 from reddit_browser.text_ai import TextAIClient  # noqa: E402
@@ -320,6 +320,9 @@ def _fetch_reddit_posts_with_retry(subreddit: str):
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status == 429:
                 LOGGER.warning("Rate limited for r/%s; skipping Reddit fetch.", subreddit)
+                return []
+            if isinstance(exc, NonJSONResponseError):
+                LOGGER.warning("Non-JSON response for r/%s; skipping Reddit fetch. %s", subreddit, exc)
                 return []
             LOGGER.error("Failed fetching r/%s (attempt %d/%d): %s", subreddit, attempt, REDDIT_RETRY_LIMIT, exc)
             if attempt < REDDIT_RETRY_LIMIT:

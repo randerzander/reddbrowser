@@ -2,12 +2,26 @@
 
 import asyncio
 import logging
+import os
 from typing import Any, Dict, List, Optional
 import requests
 from urllib.parse import urlparse, urlunparse
 from .comments import build_comment_tree as _build_comment_tree, flatten_comments as _flatten_comments
 from .firefox_session import apply_firefox_reddit_session
 from .http_headers import get_default_headers
+
+
+class NonJSONResponseError(ValueError):
+    """Raised when Reddit returns HTML or another non-JSON response."""
+
+    def __init__(self, response: requests.Response, debug_path: str):
+        self.response = response
+        self.debug_path = debug_path
+        content_type = response.headers.get("content-type", "") or "unknown content type"
+        super().__init__(
+            f"Expected JSON but got {content_type} from {response.url}; "
+            f"response body saved to {debug_path}"
+        )
 
 
 class RedditAPI:
@@ -65,8 +79,34 @@ class RedditAPI:
             )
         return None
 
+    def _save_non_json_response(self, response: requests.Response) -> str:
+        debug_dir = os.path.join(os.getcwd(), "reddit_response_debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        parsed = urlparse(response.url)
+        stem = f"{parsed.netloc}{parsed.path}".strip("/") or "reddit_response"
+        stem = "".join(char if char.isalnum() else "_" for char in stem).strip("_")
+        path = os.path.join(debug_dir, f"{stem}.html")
+        with open(path, "w", encoding="utf-8", errors="replace") as handle:
+            handle.write(response.text)
+        return path
+
+    def _decode_json_response(self, response: requests.Response) -> Any:
+        try:
+            return response.json()
+        except ValueError:
+            path = self._save_non_json_response(response)
+            content_type = response.headers.get("content-type", "")
+            self.logger.error(
+                "Expected JSON but got %s from %s; response body saved to %s",
+                content_type or "unknown content type",
+                response.url,
+                path,
+            )
+            raise NonJSONResponseError(response, path) from None
+
     def _request_json(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
         response = self.session.get(url, params=params, timeout=10)
+        used_fallback = False
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
@@ -74,12 +114,21 @@ class RedditAPI:
                 fallback_url = self._build_fallback_url(url)
                 if fallback_url:
                     response = self.session.get(fallback_url, params=params, timeout=10)
+                    used_fallback = True
                     response.raise_for_status()
                 else:
                     raise
             else:
                 raise
-        return response.json()
+        try:
+            return self._decode_json_response(response)
+        except NonJSONResponseError:
+            fallback_url = None if used_fallback else self._build_fallback_url(url)
+            if not fallback_url:
+                raise
+            response = self.session.get(fallback_url, params=params, timeout=10)
+            response.raise_for_status()
+            return self._decode_json_response(response)
 
     async def _request_json_async(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return await asyncio.to_thread(self._request_json, url, params)
